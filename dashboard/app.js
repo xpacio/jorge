@@ -1,1019 +1,1194 @@
 /* ============================================================
-   Dashboard de Sincronización DBF — Sistemas ↔ Sucursales
+   Dashboard Sincronización DBF — Central ⇄ Sucursales
+   Tabs: Resumen · Equipos · Mapas de calor · Vendedores · CEDIS · Detalle
+   Auto-refresco 10 min en segundo plano + tema claro/oscuro
    ============================================================ */
-
 'use strict';
 
 const API_URL = 'http://212.227.6.127:8000/api/dbf-report?format=json';
+const REFRESH_MS = 10 * 60 * 1000;
+
+const SYNC_ORDER = { 'Desactualizado': 0, 'Sin referencia': 1, 'Sincronizado': 2 };
+const SYNC_COLORS = { 'Sincronizado': '#34d399', 'Sin referencia': '#8a92a8', 'Desactualizado': '#f87171' };
+const TIPO_LABEL = { vendedor: 'Vendedor', cedis: 'CEDIS', tienda: 'Tienda' };
+const TIPO_BADGE = { vendedor: 'badge--blue', cedis: 'badge--amber', tienda: 'badge--muted' };
+
+const VENDOR_RE = /vendedor|b2b|ventas?\s*(especial|corporativ)?|corporativ|especial/i;
+const VENDOR_NAMES = new Set(['Yasmileth Valenzuela', 'ERVIN MACHADO', 'MELANI FARDO', 'KARINA PICADO', 'Adriana de la Rosa']);
+const CEDIS_RE = /almacen|bodega|activo fijo|gerente/i;
+
+const PALETTE = ['#6366f1', '#22d3ee', '#a78bfa', '#f472b6', '#34d399', '#fbbf24', '#f87171', '#60a5fa', '#fb923c', '#34a853'];
 
 const state = {
   selected: { plaza: new Set(), grupo: new Set(), computadora: new Set(), archivo: new Set() },
-  sync: new Set(),
-  online: new Set(),
-  cat: new Set(),
-  ext: new Set(),
-  query: '',
-  minSize: null,
-  maxSize: null,
-  fromDate: null,
-  toDateEnd: null,
-  sortKey: 'sync',
-  sortDir: 'asc',
-  page: 1,
-  perPage: 20,
+  sync: new Set(), online: new Set(), cat: new Set(), ext: new Set(), tipo: new Set(),
+  query: '', minSize: null, maxSize: null, fromDate: null, toDateEnd: null,
+  sortKey: 'sync', sortDir: 'asc',
+  eqSortKey: 'computadora', eqSortDir: 'asc',
+  page: 1, perPage: 20, heatMetric: 'count'
 };
 
 let DATA = [];
 let FILTERED = [];
-let charts = {};
-let toastTimer = null;
+let nextRefreshAt = Date.now() + REFRESH_MS;
+let autoTimer = null;
+let activeTab = 'resumen';
 
-const PALETTE = ['#6366f1', '#22d3ee', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#60a5fa', '#f472b6', '#fb923c', '#4ade80'];
+/* ============================ Helpers ============================ */
 
-const ICONS = {
-  files: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-  ref: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>',
-  check: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
-  slash: '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>',
-  gauge: '<path d="M12 15l3.5-3.5"/><path d="M20.3 18a10 10 0 1 0-16.6 0"/>',
-  online: '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><circle cx="12" cy="10" r="2.5"/>',
-  hdd: '<line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/>',
-};
-
-const fmt = new Intl.NumberFormat('es-MX');
-
-/* ---------- utilidades ---------- */
-
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-function fmtNum(n) {
-  return fmt.format(Math.round(n));
-}
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtNum = n => new Intl.NumberFormat('es-MX').format(Math.round(n));
 
 function fmtSize(kb) {
-  if (kb == null || isNaN(kb)) return '—';
-  if (kb < 1024) return kb.toFixed(kb < 10 ? 1 : 0) + ' KB';
-  if (kb < 1024 * 1024) return (kb / 1024).toFixed(2) + ' MB';
-  return (kb / 1024 / 1024).toFixed(2) + ' GB';
+  if (!kb) return '0 KB';
+  if (kb < 1024) return fmtNum(kb) + ' KB';
+  const mb = kb / 1024;
+  if (mb < 1024) return fmtNum(mb) + ' MB';
+  return fmtNum(mb / 1024) + ' GB';
 }
 
-function parseModDate(str) {
-  if (!str) return null;
-  const m = String(str).match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)?$/i);
-  if (!m) return null;
-  let h = +m[4];
-  if (m[7]) {
-    const ampm = m[7].toUpperCase();
-    if (ampm === 'PM' && h !== 12) h += 12;
-    if (ampm === 'AM' && h === 12) h = 0;
-  }
-  return new Date(+m[1], +m[2] - 1, +m[3], h, +m[5], +m[6]);
+function timeAgo(ts) {
+  if (!ts) return '—';
+  const sec = Math.max(0, (Date.now() - ts) / 1000);
+  if (sec < 60) return 'hace ' + Math.round(sec) + ' s';
+  if (sec < 3600) return 'hace ' + Math.round(sec / 60) + ' min';
+  if (sec < 86400) return 'hace ' + Math.round(sec / 3600) + ' h';
+  return 'hace ' + Math.round(sec / 86400) + ' días';
 }
 
-function parseConnDate(str) {
-  if (!str) return null;
-  const d = new Date(str.replace(' ', 'T'));
-  return isNaN(d) ? null : d;
+function parseModDate(s) {
+  if (!s) return -Infinity;
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return -Infinity;
+  let h = parseInt(m[4], 10);
+  const isPM = /pm/i.test(m[7]);
+  if (isPM && h < 12) h += 12;
+  if (!isPM && h === 12) h = 0;
+  return new Date(+m[1], +m[2] - 1, +m[3], h, +m[5], +m[6]).getTime();
 }
 
-function timeAgo(date) {
-  if (!date) return '—';
-  const s = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (s < 60) return 'hace ' + s + ' s';
-  if (s < 3600) return 'hace ' + Math.floor(s / 60) + ' min';
-  if (s < 86400) return 'hace ' + Math.floor(s / 3600) + ' h';
-  if (s < 86400 * 30) return 'hace ' + Math.floor(s / 86400) + ' d';
-  return date.toLocaleDateString('es-MX');
+function parseConnDate(s) {
+  if (!s) return null;
+  const d = new Date(String(s).replace(' ', 'T'));
+  return isNaN(d.getTime()) ? null : d.getTime();
 }
 
+function hexRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+const RGB = {
+  indigo: hexRgb('#6366f1'), cyan: hexRgb('#22d3ee'),
+  green: hexRgb('#34d399'), gray: hexRgb('#8a92a8'), red: hexRgb('#f87171')
+};
+
+let toastTimer = null;
 function toast(msg, isError) {
-  const el = document.getElementById('toast');
+  const el = $('toast');
   el.textContent = msg;
-  el.classList.toggle('toast--error', !!isError);
-  el.classList.add('is-show');
+  el.className = 'toast is-show' + (isError ? ' toast--error' : '');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('is-show'), 3500);
+  toastTimer = setTimeout(() => { el.classList.remove('is-show'); }, 3200);
 }
 
-function svgIcon(name, size) {
-  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="' + (size || 16) + '" height="' + (size || 16) + '">' + ICONS[name] + '</svg>';
+/* ============================ Clasificación ============================ */
+
+function esVendedor(r) {
+  return VENDOR_NAMES.has(r.computadora) || VENDOR_RE.test([r.grupo, r.computadora].join(' '));
+}
+function esCedis(r) {
+  return CEDIS_RE.test([r.grupo, r.computadora].join(' '));
 }
 
-/* ---------- carga de datos ---------- */
+function enrich(r) {
+  const ruta = r.ruta_rbf || '';
+  const parts = ruta.split('/');
+  const centralCat = parts.length > 1 && ruta.startsWith('/') ? (parts[1] || 'N/A') : null;
+  const name = String(r.archivo || '');
+  const ext = name.includes('.') ? name.split('.').pop().toUpperCase() : 'SIN';
+  const isExe = ext === 'EXE';
+  const fileCat = isExe ? 'exe' : /quickbck/i.test(name) ? 'quickbck' : 'other';
+  const hasRef = !!r.ruta_rbf;
+  const sync = hasRef
+    ? (r.md5 && r.md5 === r.hash_rbf ? 'Sincronizado' : 'Desactualizado')
+    : 'Sin referencia';
+  return {
+    ...r,
+    ext, fileCat, centralCat, hasRef, sync,
+    tipo: esVendedor(r) ? 'vendedor' : esCedis(r) ? 'cedis' : 'tienda',
+    modDate: parseModDate(r.ultima_modificacion),
+    connDate: parseConnDate(r.ultima_conexion),
+    computadora: r.computadora || 'N/D'
+  };
+}
 
-async function loadData() {
-  const loader = document.getElementById('loader');
-  const btn = document.getElementById('btnRefresh');
-  loader.classList.remove('is-hidden');
-  btn.classList.add('is-loading');
+/* ============================ Estado / filtros ============================ */
+
+function resetFilters() {
+  Object.values(state.selected).forEach(s => s.clear());
+  state.sync.clear(); state.online.clear(); state.cat.clear(); state.ext.clear(); state.tipo.clear();
+  state.query = ''; state.minSize = null; state.maxSize = null;
+  state.fromDate = null; state.toDateEnd = null;
+  state.page = 1;
+  ['searchQuery', 'minSize', 'maxSize', 'fromDate', 'toDate'].forEach(id => { $(id).value = ''; });
+}
+
+function buildFilterOptions() {
+  const opts = { plaza: new Map(), grupo: new Map(), computadora: new Map(), archivo: new Map() };
+  for (const r of DATA) {
+    for (const k of Object.keys(opts)) {
+      const v = r[k === 'computadora' ? 'computadora' : k];
+      const key = String(v ?? 'N/A');
+      opts[k].set(key, (opts[k].get(key) || 0) + 1);
+    }
+  }
+  for (const k of Object.keys(opts)) {
+    const list = Array.from(opts[k].entries()).sort((a, b) => a[0].localeCompare(b[0], 'es'));
+    createMultiselect('ms' + k.charAt(0).toUpperCase() + k.slice(1), k, list);
+  }
+  createChips('chipsSync', 'sync', [
+    { v: 'Sincronizado', label: 'Sincronizado', cls: 'chip--green' },
+    { v: 'Sin referencia', label: 'Sin referencia' },
+    { v: 'Desactualizado', label: 'Desactualizado', cls: 'chip--red' }
+  ]);
+  createChips('chipsOnline', 'online', [
+    { v: 'online', label: 'Online', cls: 'chip--green' },
+    { v: 'offline', label: 'Offline', cls: 'chip--red' }
+  ]);
+  createChips('chipsTipo', 'tipo', [
+    { v: 'vendedor', label: 'Vendedor', cls: 'chip--blue' },
+    { v: 'cedis', label: 'CEDIS', cls: 'chip--amber' },
+    { v: 'tienda', label: 'Tienda' }
+  ]);
+  createChips('chipsCat', 'cat', Array.from(new Set(DATA.filter(r => r.centralCat).map(r => r.centralCat)))
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map(c => ({ v: c, label: c, cls: 'chip--purple' })));
+  createChips('chipsExt', 'ext', Array.from(new Set(DATA.map(r => r.ext)))
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map(e => ({ v: e, label: e, cls: 'chip--blue' })));
+}
+
+function syncChipUI() {
+  const selMap = { chipsSync: state.sync, chipsOnline: state.online, chipsCat: state.cat, chipsExt: state.ext, chipsTipo: state.tipo };
+  for (const [hostId, set] of Object.entries(selMap)) {
+    document.querySelectorAll('#' + hostId + ' .chip').forEach(chip => {
+      chip.classList.toggle('is-active', set.has(chip.textContent.trim()));
+    });
+  }
+}
+
+function matches(r) {
+  if (state.selected.plaza.size && !state.selected.plaza.has(r.plaza)) return false;
+  if (state.selected.grupo.size && !state.selected.grupo.has(r.grupo)) return false;
+  if (state.selected.computadora.size && !state.selected.computadora.has(r.computadora)) return false;
+  if (state.selected.archivo.size && !state.selected.archivo.has(r.archivo)) return false;
+  if (state.sync.size && !state.sync.has(r.sync)) return false;
+  if (state.online.size && !state.online.has(r.estado)) return false;
+  if (state.cat.size && !state.cat.has(r.centralCat)) return false;
+  if (state.ext.size && !state.ext.has(r.ext)) return false;
+  if (state.tipo.size && !state.tipo.has(r.tipo)) return false;
+  if (state.query) {
+    const q = state.query.toLowerCase();
+    if (!String(r.archivo + ' ' + r.md5 + ' ' + r.ruta + ' ' + r.ruta_rbf + ' ' + r.computadora).toLowerCase().includes(q)) return false;
+  }
+  const sz = r.tamano_kb || 0;
+  if (state.minSize !== null && state.minSize !== '' && sz < +state.minSize) return false;
+  if (state.maxSize !== null && state.maxSize !== '' && sz > +state.maxSize) return false;
+  if (state.fromDate) {
+    const d = new Date(state.fromDate + 'T00:00:00').getTime();
+    if (r.modDate !== -Infinity && r.modDate < d) return false;
+  }
+  if (state.toDateEnd) {
+    const d = new Date(state.toDateEnd + 'T23:59:59.999').getTime();
+    if (r.modDate !== -Infinity && r.modDate > d) return false;
+  }
+  return true;
+}
+
+function applyFilters() {
+  FILTERED = DATA.filter(matches);
+  const had = state.query || state.selected.plaza.size || state.selected.grupo.size || state.selected.computadora.size ||
+    state.selected.archivo.size || state.sync.size || state.online.size || state.cat.size || state.ext.size || state.tipo.size ||
+    state.minSize !== null && state.minSize !== '' || state.maxSize !== null && state.maxSize !== '' || state.fromDate || state.toDateEnd;
+  if (!had) state.page = 1;
+  if (state.page > Math.max(1, Math.ceil(FILTERED.length / state.perPage))) state.page = 1;
+  $('resultCount').textContent = fmtNum(FILTERED.length) + ' registros';
+  renderActiveFilters();
+  renderAll();
+}
+
+/* ============================ Multiselect / chips ============================ */
+
+function createMultiselect(hostId, key, items) {
+  const host = $(hostId);
+  if (!host) return;
+  host.innerHTML = '';
+  const selected = state.selected[key];
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'ms__toggle';
+  toggle.innerHTML = '<span class="ms__toggle-label">Todos</span><span class="ms__toggle-count">0</span><span class="ms__caret">▼</span>';
+
+  const menu = document.createElement('div');
+  menu.className = 'ms__menu';
+  menu.innerHTML = '<input type="search" class="ms__search" placeholder="Buscar…" autocomplete="off"><button type="button" class="ms__select-all">Seleccionar todos</button><div class="ms__options"></div>';
+
+  const optionsBox = menu.querySelector('.ms__options');
+  const search = menu.querySelector('.ms__search');
+  const selectAll = menu.querySelector('.ms__select-all');
+
+  function renderOptions(filter = '') {
+    optionsBox.innerHTML = '';
+    const shown = items.filter(([name]) => !filter || name.toLowerCase().includes(filter.toLowerCase()));
+    if (!shown.length) { optionsBox.innerHTML = '<div class="ms__empty">Sin coincidencias</div>'; return; }
+    shown.forEach(([name, count]) => {
+      const label = document.createElement('label');
+      label.className = 'ms__option';
+      label.innerHTML = '<input type="checkbox" value="' + esc(name) + '"><span>' + esc(name) + '</span><b>' + fmtNum(count) + '</b>';
+      label.querySelector('input').checked = selected.has(name);
+      label.querySelector('input').addEventListener('change', e => {
+        if (e.target.checked) selected.add(name); else selected.delete(name);
+        updateToggle();
+        applyFilters();
+      });
+      optionsBox.appendChild(label);
+    });
+  }
+
+  function updateToggle() {
+    const n = selected.size;
+    const label = toggle.querySelector('.ms__toggle-label');
+    toggle.querySelector('.ms__toggle-count').textContent = n;
+    label.textContent = n === 0 ? 'Todos' : n === items.length ? 'Todos' : n + ' seleccionado' + (n > 1 ? 's' : '');
+  }
+
+  toggle.addEventListener('click', e => { e.stopPropagation(); closeAllMenus(); host.classList.toggle('is-open'); menu.classList.toggle('is-open'); });
+  search.addEventListener('input', () => renderOptions(search.value));
+  selectAll.addEventListener('click', () => {
+    const all = items.map(([name]) => name);
+    if (selected.size === items.length) { all.forEach(n => selected.delete(n)); }
+    else { all.forEach(n => selected.add(n)); }
+    renderOptions(search.value);
+    updateToggle();
+    applyFilters();
+  });
+
+  host.appendChild(toggle);
+  host.appendChild(menu);
+  renderOptions();
+  updateToggle();
+}
+
+function createChips(hostId, key, opts) {
+  const host = $(hostId);
+  if (!host) return;
+  host.innerHTML = '';
+  const selected = state[key];
+  opts.forEach(o => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip ' + (o.cls || '');
+    chip.textContent = o.label;
+    chip.classList.toggle('is-active', selected.has(o.v));
+    chip.addEventListener('click', () => {
+      if (selected.has(o.v)) selected.delete(o.v); else selected.add(o.v);
+      chip.classList.toggle('is-active', selected.has(o.v));
+      applyFilters();
+    });
+    host.appendChild(chip);
+  });
+}
+
+function closeAllMenus() {
+  document.querySelectorAll('.ms').forEach(m => { m.classList.remove('is-open'); m.querySelector('.ms__menu')?.classList.remove('is-open'); });
+}
+
+/* ============================ KPIs ============================ */
+
+function kpiCard(label, value, sub, cls, icon) {
+  return '<div class="kpi-card ' + (cls || '') + '"><span class="kpi-card__icon">' + icon + '</span>' +
+    '<div class="kpi-card__label">' + label + '</div>' +
+    '<div class="kpi-card__value" data-count="' + value + '">0</div>' +
+    (sub ? '<div class="kpi-card__sub">' + sub + '</div>' : '') + '</div>';
+}
+
+function countUpAll() {
+  document.querySelectorAll('.kpi-card__value[data-count]').forEach(el => {
+    const target = parseFloat(el.dataset.count);
+    const dur = 900, t0 = performance.now();
+    function frame(t) {
+      const p = Math.min(1, (t - t0) / dur);
+      const e = 1 - Math.pow(1 - p, 3);
+      el.textContent = target >= 1e6 ? fmtSize(target) : (target >= 1000 ? fmtNum(target * e) : Math.round(target * e));
+      if (p < 1) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+function coveragePct(conRef, total) { return total ? (conRef / total) * 100 : 0; }
+
+function renderKPIs() {
+  const total = FILTERED.length;
+  const conRef = FILTERED.filter(r => r.hasRef).length;
+  const sync = FILTERED.filter(r => r.sync === 'Sincronizado').length;
+  const sinRef = total - conRef;
+  const cover = total ? (conRef / total) * 100 : 0;
+  const computadoras = new Set(FILTERED.map(r => r.computadora)).size;
+  const onlineSet = new Set(FILTERED.filter(r => r.estado === 'online').map(r => r.computadora));
+  const offComputers = new Set(FILTERED.map(r => r.computadora));
+  onlineSet.forEach(c => offComputers.delete(c));
+  const totalSize = FILTERED.reduce((a, r) => a + (r.tamano_kb || 0), 0);
+
+  $('kpiGrid').innerHTML =
+    kpiCard('Archivos totales', total, computadoras + ' sucursales', 'kpi--accent', '&#128190;') +
+    kpiCard('Con referencia central', conRef, 'Catálogos publicados por Sistemas', '', '&#128203;') +
+    kpiCard('Sincronizados', sync, (total ? (sync / total) * 100 : 0).toFixed(1) + '% del total', 'kpi--green', '&#10003;') +
+    kpiCard('Sin referencia', sinRef, 'Archivos locales / ejecutables', 'kpi--amber', '&#9888;') +
+    kpiCard('Cobertura', cover.toFixed(1) + '%', 'Con referencia / total', 'kpi--blue', '&#127775;') +
+    kpiCard('Equipos online', onlineSet.size, 'Reportan conexión reciente', 'kpi--green', '&#128187;') +
+    kpiCard('Equipos offline', offComputers.size, 'Sin conexión', 'kpi--red', '&#128273;') +
+    kpiCard('Tamaño total', totalSize, fmtSize(totalSize), 'kpi--purple', '&#128190;');
+  countUpAll();
+}
+
+function renderEquiposKPIs() {
+  const comps = summarizeComputers(FILTERED);
+  const online = comps.filter(c => c.online).length;
+  const offline = comps.length - online;
+  const nVend = comps.filter(c => c.tipo === 'vendedor').length;
+  const nCed = comps.filter(c => c.tipo === 'cedis').length;
+  const nTienda = comps.filter(c => c.tipo === 'tienda').length;
+  const archivos = FILTERED.length;
+
+  $('kpiEquipos').innerHTML =
+    kpiCard('Equipos', comps.length, 'Sucursales y centros reportados', 'kpi--accent', '&#128187;') +
+    kpiCard('Online', online, (comps.length ? (online / comps.length) * 100 : 0).toFixed(1) + ' % del total', 'kpi--green', '&#128268;') +
+    kpiCard('Offline', offline, 'Sin registro online', 'kpi--red', '&#128273;') +
+    kpiCard('Tiendas', nTienda, 'Sucursales tipo tienda', '', '&#127978;') +
+    kpiCard('Vendedores', nVend, 'Equipos de venta / B2B', 'kpi--blue', '&#128104;') +
+    kpiCard('CEDIS', nCed, 'Almacenes / distribución', 'kpi--amber', '&#128666;') +
+    kpiCard('Archivos reportados', archivos, 'Registros de los equipos', 'kpi--purple', '&#128190;');
+  countUpAll();
+}
+
+function renderVendedoresKPIs(rows) {
+  const comps = summarizeComputers(rows);
+  const online = comps.filter(c => c.online).length;
+  const offline = comps.length - online;
+  const conRef = rows.filter(r => r.hasRef).length;
+  const sync = rows.filter(r => r.sync === 'Sincronizado').length;
+  const size = rows.reduce((a, r) => a + (r.tamano_kb || 0), 0);
+
+  $('kpiVendedores').innerHTML =
+    kpiCard('Equipos de venta', comps.length, 'Fuerza de ventas / B2B', 'kpi--blue', '&#128104;') +
+    kpiCard('Archivos', rows.length, 'Registros reportados', 'kpi--accent', '&#128190;') +
+    kpiCard('Con referencia', conRef, 'Catálogos de Sistemas', '', '&#128203;') +
+    kpiCard('Sincronizados', sync, (rows.length ? (sync / rows.length) * 100 : 0).toFixed(1) + '%', 'kpi--green', '&#10003;') +
+    kpiCard('Equipos online', online, 'Con conexión reciente', 'kpi--green', '&#128268;') +
+    kpiCard('Equipos offline', offline, 'Sin registro online', 'kpi--red', '&#128273;') +
+    kpiCard('Cobertura', (rows.length ? (conRef / rows.length) * 100 : 0).toFixed(1) + '%', 'Referencia / total', 'kpi--amber', '&#127775;') +
+    kpiCard('Tamaño', size, fmtSize(size), 'kpi--purple', '&#128190;');
+  countUpAll();
+}
+
+function renderCedisKPIs(rows) {
+  const comps = summarizeComputers(rows);
+  const online = comps.filter(c => c.online).length;
+  const offline = comps.length - online;
+  const conRef = rows.filter(r => r.hasRef).length;
+  const sync = rows.filter(r => r.sync === 'Sincronizado').length;
+  const size = rows.reduce((a, r) => a + (r.tamano_kb || 0), 0);
+
+  $('kpiCedis').innerHTML =
+    kpiCard('Centros CEDIS', comps.length, 'Almacenes / distribución', 'kpi--amber', '&#128666;') +
+    kpiCard('Archivos', rows.length, 'Registros reportados', 'kpi--accent', '&#128190;') +
+    kpiCard('Con referencia', conRef, 'Catálogos de Sistemas', '', '&#128203;') +
+    kpiCard('Sincronizados', sync, (rows.length ? (sync / rows.length) * 100 : 0).toFixed(1) + '%', 'kpi--green', '&#10003;') +
+    kpiCard('Centros online', online, 'Con conexión reciente', 'kpi--green', '&#128268;') +
+    kpiCard('Centros offline', offline, 'Sin registro online', 'kpi--red', '&#128273;') +
+    kpiCard('Cobertura', (rows.length ? (conRef / rows.length) * 100 : 0).toFixed(1) + '%', 'Referencia / total', 'kpi--blue', '&#127775;') +
+    kpiCard('Tamaño', size, fmtSize(size), 'kpi--purple', '&#128190;');
+  countUpAll();
+}
+
+/* ============================ Gráficas ============================ */
+
+const centerText = {
+  id: 'centerText',
+  afterDraw(chart) {
+    if (chart.config.type !== 'doughnut') return;
+    const { ctx } = chart;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta || !meta.data.length) return;
+    const first = meta.data[0];
+    const x = first.x, y = first.y;
+    const total = chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+    const light = document.documentElement.dataset.theme === 'light';
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = light ? '#1b2338' : '#e8ebf5';
+    ctx.font = '700 20px Inter, sans-serif';
+    ctx.fillText(fmtNum(total), x, y - 6);
+    ctx.fillStyle = light ? '#5d6b84' : '#8a92a8';
+    ctx.font = '500 10px Inter, sans-serif';
+    ctx.fillText(chart.options.plugins.centerText?.label || '', x, y + 14);
+    ctx.restore();
+  }
+};
+
+function chartDefaults() {
+  const light = document.documentElement.dataset.theme === 'light';
+  Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
+  Chart.defaults.color = light ? '#5d6b84' : '#8a92a8';
+  Chart.defaults.borderColor = light ? 'rgba(15,23,42,0.07)' : 'rgba(255,255,255,0.06)';
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.boxWidth = 8;
+  Chart.defaults.plugins.tooltip.backgroundColor = light ? '#ffffff' : '#141a2e';
+  Chart.defaults.plugins.tooltip.titleColor = light ? '#1b2338' : '#e8ebf5';
+  Chart.defaults.plugins.tooltip.bodyColor = light ? '#1b2338' : '#c6c9d4';
+  Chart.defaults.plugins.tooltip.borderColor = 'rgba(99,102,241,0.4)';
+  Chart.defaults.plugins.tooltip.borderWidth = 1;
+}
+
+function dona(id, labels, data, colors, centerLabel) {
+  const host = $(id);
+  if (!host) return;
+  showChartHost(id);
+  const ctx = host.getContext('2d');
+  const existing = Chart.getChart(host);
+  if (existing) existing.destroy();
+  new Chart(ctx, {
+    type: 'doughnut',
+    data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 0, hoverOffset: 6 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      cutout: '68%',
+      plugins: {
+        legend: { position: 'right', labels: { padding: 14 } },
+        centerText: { label: centerLabel }
+      }
+    },
+    plugins: [centerText]
+  });
+}
+
+function barChart(id, labels, datasets, opts = {}) {
+  const host = $(id);
+  if (!host) return;
+  showChartHost(id);
+  const ctx = host.getContext('2d');
+  const existing = Chart.getChart(host);
+  if (existing) existing.destroy();
+  const light = document.documentElement.dataset.theme === 'light';
+  const isH = opts.horizontal;
+  new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      indexAxis: isH ? 'y' : 'x',
+      plugins: {
+        legend: opts.legend === false ? { display: false } : { position: 'top', labels: { padding: 12 } },
+        tooltip: {
+          callbacks: isH ? { label: c => ' ' + fmtNum(c.parsed.x) + (opts.tooltipUnit || '') } : undefined
+        }
+      },
+      scales: {
+        x: isH ? { grid: { display: false }, ticks: { font: { size: 10 } } } : { grid: { display: false }, stacked: opts.stacked },
+        y: isH ? { grid: { color: light ? 'rgba(15,23,42,0.06)' : 'rgba(255,255,255,0.05)' }, ticks: { font: { size: 10 } }, stacked: opts.stacked }
+            : { grid: { color: light ? 'rgba(15,23,42,0.06)' : 'rgba(255,255,255,0.05)' }, ticks: { font: { size: 10 } } }
+      }
+    }
+  });
+}
+
+function lineChart(id, labels, data) {
+  const host = $(id);
+  if (!host) return;
+  showChartHost(id);
+  const ctx = host.getContext('2d');
+  const existing = Chart.getChart(host);
+  if (existing) existing.destroy();
+  const grad = ctx.createLinearGradient(0, 0, 0, 320);
+  grad.addColorStop(0, 'rgba(99,102,241,0.35)');
+  grad.addColorStop(1, 'rgba(99,102,241,0.02)');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data, borderColor: '#6366f1', backgroundColor: grad, fill: true,
+        tension: 0.35, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { font: { size: 10 } } }
+      }
+    }
+  });
+}
+
+function renderCharts() {
+  const total = FILTERED.length;
+  if (!total) {
+    ['chartSync', 'chartCat', 'chartExt', 'chartPlaza', 'chartActivity', 'chartHeavy'].forEach(id => {
+      renderEmpty(id, 'Sin datos con los filtros actuales');
+    });
+    return;
+  }
+
+  const syncCounts = ['Sincronizado', 'Sin referencia', 'Desactualizado'].map(k => FILTERED.filter(r => r.sync === k).length);
+  dona('chartSync', ['Sincronizado', 'Sin referencia', 'Desactualizado'], syncCounts,
+    [SYNC_COLORS.Sincronizado, SYNC_COLORS['Sin referencia'], SYNC_COLORS.Desactualizado], 'archivos');
+
+  const cats = new Map();
+  FILTERED.filter(r => r.centralCat).forEach(r => cats.set(r.centralCat, (cats.get(r.centralCat) || 0) + 1));
+  const catArr = Array.from(cats.entries()).sort((a, b) => b[1] - a[1]);
+  if (catArr.length) dona('chartCat', catArr.map(([k]) => k), catArr.map(([, v]) => v), PALETTE, 'archivos');
+  else renderEmpty('chartCat', 'Sin catálogos centrales');
+
+  const exts = new Map();
+  FILTERED.forEach(r => exts.set(r.ext, (exts.get(r.ext) || 0) + 1));
+  const extArr = Array.from(exts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  barChart('chartExt', extArr.map(([k]) => k), [{
+    label: 'Archivos', data: extArr.map(([, v]) => v),
+    backgroundColor: 'rgba(99,102,241,0.7)', borderRadius: 6, maxBarThickness: 34
+  }], { legend: false });
+
+  const plazas = Array.from(new Set(FILTERED.map(r => r.plaza))).sort((a, b) => a.localeCompare(b, 'es'));
+  const pCon = plazas.map(p => FILTERED.filter(r => r.plaza === p && r.hasRef).length);
+  const pSin = plazas.map(p => FILTERED.filter(r => r.plaza === p && !r.hasRef).length);
+  barChart('chartPlaza', plazas, [
+    { label: 'Con referencia', data: pCon, backgroundColor: '#6366f1', borderRadius: 4, maxBarThickness: 30, stack: 'a' },
+    { label: 'Sin referencia', data: pSin, backgroundColor: 'rgba(138,146,168,0.5)', borderRadius: 4, maxBarThickness: 30, stack: 'a' }
+  ], { stacked: true });
+
+  const days = [];
+  const counts = [];
+  const now = new Date();
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(now); d.setDate(now.getDate() - i); d.setHours(0, 0, 0, 0);
+    const next = d.getTime() + 86400000;
+    days.push(d.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit' }));
+    counts.push(FILTERED.filter(r => r.modDate !== -Infinity && r.modDate >= d.getTime() && r.modDate < next).length);
+  }
+  lineChart('chartActivity', days, counts);
+
+  const heavy = new Map();
+  FILTERED.forEach(r => heavy.set(r.archivo, (heavy.get(r.archivo) || 0) + (r.tamano_kb || 0)));
+  const heavyArr = Array.from(heavy.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  barChart('chartHeavy', heavyArr.map(([k]) => k), [{
+    label: 'Tamaño (MB)', data: heavyArr.map(([, v]) => Math.round(v / 1024)),
+    backgroundColor: 'rgba(34,211,238,0.65)', borderRadius: 6, maxBarThickness: 30
+  }], { legend: false, tooltipUnit: ' MB' });
+}
+
+function renderEmpty(id, msg) {
+  const host = $(id);
+  if (!host) return;
+  const existing = Chart.getChart(host);
+  if (existing) existing.destroy();
+  let note = host.parentElement.querySelector('.chart-card__empty');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'chart-card__empty';
+    host.parentElement.appendChild(note);
+  }
+  note.textContent = msg;
+  host.style.display = 'none';
+}
+
+function showChartHost(id) {
+  const host = $(id);
+  if (!host) return;
+  host.style.display = '';
+  const note = host.parentElement.querySelector('.chart-card__empty');
+  if (note) note.remove();
+}
+
+function renderEquiposCharts() {
+  const comps = summarizeComputers(FILTERED);
+  const online = comps.filter(c => c.online).length;
+  const offline = comps.length - online;
+  dona('chartEqStatus', ['Online', 'Offline'], [online, offline], ['#34d399', '#f87171'], 'equipos');
+
+  const plazas = Array.from(new Set(comps.map(c => c.plaza))).sort((a, b) => a.localeCompare(b, 'es'));
+  barChart('chartEqPlaza', plazas, [
+    { label: 'Online', data: plazas.map(p => comps.filter(c => c.plaza === p && c.online).length), backgroundColor: 'rgba(52,211,153,0.85)', borderRadius: 4, maxBarThickness: 26, stack: 'a' },
+    { label: 'Offline', data: plazas.map(p => comps.filter(c => c.plaza === p && !c.online).length), backgroundColor: 'rgba(248,113,113,0.75)', borderRadius: 4, maxBarThickness: 26, stack: 'a' }
+  ], { stacked: true });
+}
+
+function renderVendCharts(rows) {
+  const comps = summarizeComputers(rows);
+  const byPlaza = new Map();
+  comps.forEach(c => byPlaza.set(c.plaza, (byPlaza.get(c.plaza) || 0) + 1));
+  const arr = Array.from(byPlaza.entries()).sort((a, b) => b[1] - a[1]);
+  if (arr.length) dona('chartVendPlaza', arr.map(([k]) => k), arr.map(([, v]) => v), PALETTE, 'equipos');
+  else renderEmpty('chartVendPlaza', 'Sin datos');
+
+  const files = new Map();
+  rows.forEach(r => files.set(r.archivo, (files.get(r.archivo) || 0) + 1));
+  const fArr = Array.from(files.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  if (fArr.length) barChart('chartVendFiles', fArr.map(([k]) => k), [{
+    label: 'Archivos', data: fArr.map(([, v]) => v),
+    backgroundColor: 'rgba(96,165,250,0.7)', borderRadius: 6, maxBarThickness: 24
+  }], { legend: false, horizontal: true });
+  else renderEmpty('chartVendFiles', 'Sin datos');
+}
+
+function renderCedisCharts(rows) {
+  const byPlaza = new Map();
+  rows.forEach(r => byPlaza.set(r.plaza, (byPlaza.get(r.plaza) || 0) + 1));
+  const arr = Array.from(byPlaza.entries()).sort((a, b) => b[1] - a[1]);
+  if (arr.length) dona('chartCedisPlaza', arr.map(([k]) => k), arr.map(([, v]) => v), PALETTE, 'archivos');
+  else renderEmpty('chartCedisPlaza', 'Sin datos');
+
+  const comps = summarizeComputers(rows).sort((a, b) => b.total - a.total);
+  if (comps.length) barChart('chartCedisFiles', comps.map(c => c.computadora), [{
+    label: 'Archivos', data: comps.map(c => c.total),
+    backgroundColor: 'rgba(251,191,36,0.7)', borderRadius: 6, maxBarThickness: 26
+  }], { legend: false, horizontal: true });
+  else renderEmpty('chartCedisFiles', 'Sin datos');
+}
+
+/* ============================ Tablas ============================ */
+
+function summarizeComputers(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    let c = map.get(r.computadora);
+    if (!c) {
+      c = { computadora: r.computadora, plaza: r.plaza, grupo: r.grupo, tipo: r.tipo, online: false, connDate: null, total: 0, conRef: 0, sync: 0, size: 0 };
+      map.set(r.computadora, c);
+    }
+    c.total++;
+    if (r.hasRef) c.conRef++;
+    if (r.sync === 'Sincronizado') c.sync++;
+    c.size += r.tamano_kb || 0;
+    if (r.estado === 'online') c.online = true;
+    if (r.connDate && (!c.connDate || r.connDate > c.connDate)) c.connDate = r.connDate;
+  }
+  return Array.from(map.values());
+}
+
+function badgeEstado(estado) {
+  return estado === 'online'
+    ? '<span class="badge badge--green">Online</span>'
+    : '<span class="badge badge--red">Offline</span>';
+}
+
+function badgeSync(sync) {
+  const cls = sync === 'Sincronizado' ? 'badge--green' : sync === 'Desactualizado' ? 'badge--red' : 'badge--muted';
+  return '<span class="badge ' + cls + '">' + esc(sync) + '</span>';
+}
+
+function coverageBar(cov) {
+  const cls = cov >= 90 ? 'var(--green)' : cov >= 50 ? 'var(--amber)' : 'var(--red)';
+  return '<div class="coverage-cell"><div class="progress"><div class="progress__fill" style="width:' + cov.toFixed(1) + '%;background:linear-gradient(90deg,' + cls + ',' + cls + ')"></div></div>' +
+    '<span class="coverage-pct">' + cov.toFixed(1) + '%</span></div>';
+}
+
+function renderPlazaTable() {
+  const tbody = $('tblPlaza').querySelector('tbody');
+  tbody.innerHTML = '';
+  const plazas = Array.from(new Set(FILTERED.map(r => r.plaza))).sort((a, b) => a.localeCompare(b, 'es'));
+  if (!plazas.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-hint">Sin datos</td></tr>'; clearTotals(); return; }
+  const totals = { total: 0, conRef: 0, sync: 0, online: 0, offline: 0, size: 0 };
+  plazas.forEach((p, i) => {
+    const rows = FILTERED.filter(r => r.plaza === p);
+    const total = rows.length;
+    const conRef = rows.filter(r => r.hasRef).length;
+    const sync = rows.filter(r => r.sync === 'Sincronizado').length;
+    const online = rows.filter(r => r.estado === 'online').length;
+    const offline = total - online;
+    const size = rows.reduce((a, r) => a + (r.tamano_kb || 0), 0);
+    totals.total += total; totals.conRef += conRef; totals.sync += sync; totals.online += online; totals.offline += offline; totals.size += size;
+    const maxSize = Math.max(...FILTERED.map(r => r.tamano_kb || 0), 1);
+    const tr = document.createElement('tr');
+    tr.style.animationDelay = (i * 0.03) + 's';
+    tr.innerHTML = '<td><b>' + esc(p) + '</b></td>' +
+      '<td class="num"><b>' + fmtNum(total) + '</b></td>' +
+      '<td class="num">' + fmtNum(conRef) + '</td>' +
+      '<td class="num">' + fmtNum(sync) + '</td>' +
+      '<td class="num">' + fmtNum(total - conRef) + '</td>' +
+      '<td class="num">' + coverageBar((conRef / total) * 100) + '</td>' +
+      '<td class="num" style="color:var(--green)">' + fmtNum(online) + '</td>' +
+      '<td class="num" style="color:var(--red)">' + fmtNum(offline) + '</td>' +
+      '<td class="num"><div class="size-bar"><span>' + fmtSize(size) + '</span><div class="size-bar__track"><div class="size-bar__fill" style="width:' + (size / maxSize * 100) + '%"></div></div></div></td>';
+    tbody.appendChild(tr);
+  });
+  $('sumTotal').textContent = fmtNum(totals.total);
+  $('sumConRef').textContent = fmtNum(totals.conRef);
+  $('sumSync').textContent = fmtNum(totals.sync);
+  $('sumSinRef').textContent = fmtNum(totals.total - totals.conRef);
+  $('sumCover').textContent = (totals.total ? (totals.conRef / totals.total) * 100 : 0).toFixed(1) + '%';
+  $('sumOnline').textContent = fmtNum(totals.online);
+  $('sumOffline').textContent = fmtNum(totals.offline);
+  $('sumSize').textContent = fmtSize(totals.size);
+}
+
+function clearTotals() {
+  ['sumTotal', 'sumConRef', 'sumSync', 'sumSinRef', 'sumCover', 'sumOnline', 'sumOffline', 'sumSize'].forEach(id => { $(id).textContent = '—'; });
+}
+
+function renderRanking() {
+  const tbody = $('tblComputers').querySelector('tbody');
+  tbody.innerHTML = '';
+  const comps = summarizeComputers(FILTERED).sort((a, b) => b.total - a.total).slice(0, 50);
+  if (!comps.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-hint">Sin datos</td></tr>'; return; }
+  comps.forEach((c, i) => {
+    const cov = (c.conRef / c.total) * 100;
+    const tr = document.createElement('tr');
+    tr.style.animationDelay = (i * 0.02) + 's';
+    tr.innerHTML = '<td class="num mono muted">' + (i + 1) + '</td>' +
+      '<td><b>' + esc(c.computadora) + '</b></td>' +
+      '<td>' + esc(c.plaza) + '</td>' +
+      '<td><span class="badge ' + TIPO_BADGE[c.tipo] + '">' + TIPO_LABEL[c.tipo] + '</span></td>' +
+      '<td class="num"><b>' + fmtNum(c.total) + '</b></td>' +
+      '<td class="num">' + fmtNum(c.conRef) + '</td>' +
+      '<td class="num">' + fmtNum(c.total - c.conRef) + '</td>' +
+      '<td class="num" style="color:var(--green)">' + fmtNum(c.sync) + '</td>' +
+      '<td>' + coverageBar(cov) + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function renderDetailTable() {
+  const tbody = $('tblDetail').querySelector('tbody');
+  const sorted = sortRows(FILTERED);
+  const pages = Math.max(1, Math.ceil(sorted.length / state.perPage));
+  if (state.page > pages) state.page = pages;
+  const start = (state.page - 1) * state.perPage;
+  const slice = sorted.slice(start, start + state.perPage);
+  tbody.innerHTML = '';
+  if (!slice.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-hint">Sin datos con los filtros actuales</td></tr>'; }
+  slice.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.style.animationDelay = (i * 0.015) + 's';
+    tr.innerHTML =
+      '<td><b>' + esc(r.archivo) + '</b></td>' +
+      '<td>' + esc(r.computadora) + '</td>' +
+      '<td>' + esc(r.plaza) + '</td>' +
+      '<td class="muted">' + esc(r.grupo) + '</td>' +
+      '<td><span class="badge ' + TIPO_BADGE[r.tipo] + '">' + TIPO_LABEL[r.tipo] + '</span></td>' +
+      '<td class="num"><div class="size-bar"><span>' + fmtSize(r.tamano_kb) + '</span><div class="size-bar__track"><div class="size-bar__fill" style="width:' + Math.min(100, (r.tamano_kb || 0) / 4000 * 100) + '%"></div></div></div></td>' +
+      '<td>' + badgeSync(r.sync) + '</td>' +
+      '<td>' + badgeEstado(r.estado) + '</td>' +
+      '<td class="mono muted">' + esc(r.ultima_modificacion || '—') + '</td>' +
+      '<td class="mono muted" title="' + esc(r.ruta_rbf || 'Sin referencia central') + '">' + (r.ruta_rbf ? esc(r.ruta_rbf) : '—') + '</td>' +
+      '<td class="mono muted" title="' + esc(r.md5 || '') + '">' + esc((r.md5 || '—').slice(0, 12)) + '</td>';
+    tbody.appendChild(tr);
+  });
+  const startNum = sorted.length ? start + 1 : 0;
+  const endNum = Math.min(start + state.perPage, sorted.length);
+  $('detailRange').textContent = 'Mostrando ' + startNum + '–' + endNum + ' de ' + fmtNum(sorted.length);
+  $('pagerInfo').textContent = 'Página ' + state.page + ' de ' + pages;
+  $('btnPrev').disabled = state.page <= 1;
+  $('btnNext').disabled = state.page >= pages;
+}
+
+function sortRows(rows) {
+  const dir = state.sortDir === 'asc' ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    let va, vb;
+    switch (state.sortKey) {
+      case 'tamano_kb': va = a.tamano_kb || 0; vb = b.tamano_kb || 0; break;
+      case 'modDate': va = a.modDate; vb = b.modDate; break;
+      case 'md5': va = a.md5 || ''; vb = b.md5 || ''; break;
+      case 'sync': va = SYNC_ORDER[a.sync]; vb = SYNC_ORDER[b.sync]; break;
+      case 'estado': va = a.estado; vb = b.estado; break;
+      default: va = String(a[state.sortKey] ?? ''); vb = String(b[state.sortKey] ?? '');
+    }
+    if (va === vb) return 0;
+    if (va === -Infinity) return 1;
+    if (vb === -Infinity) return -1;
+    return typeof va === 'number' ? (va - vb) * dir : String(va).localeCompare(String(vb), 'es') * dir;
+  });
+}
+
+function bindSortables() {
+  document.querySelectorAll('th.sortable[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      const isDetail = th.closest('#tblDetail') !== null;
+      const s = isDetail ? state : { sortKey: state.eqSortKey, sortDir: state.eqSortDir };
+      if (s.sortKey === key) s.sortDir = s.sortDir === 'asc' ? 'desc' : 'asc';
+      else { s.sortKey = key; s.sortDir = 'asc'; }
+      if (isDetail) { state.page = 1; renderDetailTable(); } else { renderEquiposTable(); }
+      updateSortArrows();
+    });
+  });
+}
+
+function updateSortArrows() {
+  document.querySelectorAll('th.sortable[data-sort]').forEach(th => {
+    const key = th.dataset.sort;
+    const isDetail = th.closest('#tblDetail') !== null;
+    const s = isDetail ? state : { sortKey: state.eqSortKey, sortDir: state.eqSortDir };
+    const on = s.sortKey === key;
+    th.classList.toggle('is-sorted', on);
+    const arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = on ? (s.sortDir === 'asc' ? '▲' : '▼') : '';
+  });
+}
+
+function renderEquiposTable() {
+  const tbody = $('tblEquipos').querySelector('tbody');
+  const comps = summarizeComputers(FILTERED);
+  const dir = state.eqSortDir === 'asc' ? 1 : -1;
+  comps.sort((a, b) => {
+    let va, vb;
+    switch (state.eqSortKey) {
+      case 'total': case 'conRef': case 'sync': case 'size': va = a[state.eqSortKey]; vb = b[state.eqSortKey]; break;
+      case 'connDate': va = a.connDate || -Infinity; vb = b.connDate || -Infinity; break;
+      case 'estado': va = a.online ? 1 : 0; vb = b.online ? 1 : 0; break;
+      default: va = String(a[state.eqSortKey] ?? ''); vb = String(b[state.eqSortKey] ?? '');
+    }
+    if (va === vb) return 0;
+    if (va === -Infinity) return 1;
+    if (vb === -Infinity) return -1;
+    return typeof va === 'number' ? (va - vb) * dir : String(va).localeCompare(String(vb), 'es') * dir;
+  });
+  tbody.innerHTML = '';
+  if (!comps.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-hint">Sin datos</td></tr>'; return; }
+  const maxTotal = Math.max(...comps.map(c => c.total), 1);
+  comps.forEach((c, i) => {
+    const cov = (c.conRef / c.total) * 100;
+    const tr = document.createElement('tr');
+    tr.style.animationDelay = (i * 0.005) + 's';
+    tr.innerHTML =
+      '<td><b>' + esc(c.computadora) + '</b></td>' +
+      '<td>' + esc(c.plaza) + '</td>' +
+      '<td class="muted">' + esc(c.grupo) + '</td>' +
+      '<td><span class="badge ' + TIPO_BADGE[c.tipo] + '">' + TIPO_LABEL[c.tipo] + '</span></td>' +
+      '<td>' + badgeEstado(c.online ? 'online' : 'offline') + '</td>' +
+      '<td class="mono muted">' + (c.connDate ? new Date(c.connDate).toLocaleString('es-MX', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + ' <span style="opacity:.7">(' + timeAgo(c.connDate) + ')</span>' : '—') + '</td>' +
+      '<td class="num"><b>' + fmtNum(c.total) + '</b><div class="progress" style="margin-top:4px"><div class="progress__fill" style="width:' + (c.total / maxTotal * 100) + '%"></div></div></td>' +
+      '<td class="num" style="color:var(--green)">' + fmtNum(c.sync) + '</td>' +
+      '<td class="num">' + fmtNum(c.conRef) + '</td>' +
+      '<td>' + coverageBar(cov) + '</td>' +
+      '<td class="num">' + fmtSize(c.size) + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function renderTipoTable(tblId, rows) {
+  const tbody = $(tblId).querySelector('tbody');
+  tbody.innerHTML = '';
+  const comps = summarizeComputers(rows).sort((a, b) => b.total - a.total);
+  if (!comps.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-hint">Sin datos</td></tr>'; return; }
+  const maxTotal = Math.max(...comps.map(c => c.total), 1);
+  comps.forEach((c, i) => {
+    const cov = (c.conRef / c.total) * 100;
+    const tr = document.createElement('tr');
+    tr.style.animationDelay = (i * 0.02) + 's';
+    tr.innerHTML =
+      '<td><b>' + esc(c.computadora) + '</b></td>' +
+      '<td>' + esc(c.plaza) + '</td>' +
+      '<td class="muted">' + esc(c.grupo) + '</td>' +
+      '<td>' + badgeEstado(c.online ? 'online' : 'offline') + '</td>' +
+      '<td class="num"><b>' + fmtNum(c.total) + '</b><div class="progress" style="margin-top:4px"><div class="progress__fill" style="width:' + (c.total / maxTotal * 100) + '%"></div></div></td>' +
+      '<td class="num">' + fmtNum(c.conRef) + '</td>' +
+      '<td class="num">' + fmtNum(c.total - c.conRef) + '</td>' +
+      '<td class="num" style="color:var(--green)">' + fmtNum(c.sync) + '</td>' +
+      '<td>' + coverageBar(cov) + '</td>' +
+      '<td class="num">' + fmtSize(c.size) + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+/* ============================ Mapas de calor ============================ */
+
+function buildMatrix(rows, rowKey, colKey, metric) {
+  const cell = new Map(), rowsM = new Map(), colsM = new Map();
+  let max = 0;
+  for (const r of rows) {
+    const rk = String(r[rowKey] ?? 'N/A');
+    const ck = String(r[colKey] ?? 'N/A');
+    const key = rk + '\u0000' + ck;
+    const v = cell.get(key) || 0;
+    const add = metric === 'size' ? (r.tamano_kb || 0) : 1;
+    cell.set(key, v + add);
+    rowsM.set(rk, (rowsM.get(rk) || 0) + add);
+    colsM.set(ck, (colsM.get(ck) || 0) + add);
+    if (v + add > max) max = v + add;
+  }
+  return { cell, rows: rowsM, cols: colsM, max };
+}
+
+function renderHeatmap(hostId, hintId, rowOrder, colOrder, mat, colorByCol, metric) {
+  const host = $(hostId);
+  const hint = $(hintId);
+  hint.textContent = metric === 'size' ? 'Celda = tamaño (KB acumulado)' : 'Celda = cantidad de archivos';
+  host.innerHTML = '';
+  if (!rowOrder.length || !colOrder.length) { host.innerHTML = '<span class="panel__hint">Sin datos con los filtros actuales</span>'; return; }
+
+  const display = v => metric === 'size' ? fmtSize(v) : fmtNum(v);
+  const cellBg = (hex, v) => {
+    if (!v) return 'transparent';
+    const a = Math.max(0.08, Math.pow(v / mat.max, 0.7) * 0.9);
+    return 'rgba(' + hex.r + ',' + hex.g + ',' + hex.b + ',' + a.toFixed(2) + ')';
+  };
+
+  const head = document.createElement('div');
+  head.className = 'heatmap__row';
+  head.appendChild(Object.assign(document.createElement('div'), { className: 'heatmap__cell heatmap__cell--corner' }));
+  for (const ck of colOrder) {
+    const d = document.createElement('div');
+    d.className = 'heatmap__cell heatmap__cell--head';
+    d.textContent = ck;
+    d.title = ck + ' · total ' + display(mat.cols.get(ck) || 0);
+    head.appendChild(d);
+  }
+  host.appendChild(head);
+
+  for (const rk of rowOrder) {
+    const row = document.createElement('div');
+    row.className = 'heatmap__row';
+    const lab = document.createElement('div');
+    lab.className = 'heatmap__cell heatmap__cell--label';
+    lab.innerHTML = esc(rk) + ' <span class="heatmap__total">' + display(mat.rows.get(rk) || 0) + '</span>';
+    lab.title = rk + ' · total ' + display(mat.rows.get(rk) || 0);
+    row.appendChild(lab);
+    for (const ck of colOrder) {
+      const v = mat.cell.get(rk + '\u0000' + ck) || 0;
+      const col = colorByCol[ck] || colorByCol._;
+      const d = document.createElement('div');
+      d.className = 'heatmap__cell';
+      d.textContent = display(v);
+      d.style.background = cellBg(col, v);
+      d.title = rk + ' × ' + ck + ': ' + display(v) + (metric === 'size' ? '' : ' archivos');
+      if (!v) d.classList.add('heatmap__cell--zero');
+      row.appendChild(d);
+    }
+    host.appendChild(row);
+  }
+}
+
+function renderHeatmaps() {
+  const metric = state.heatMetric;
+  if (!FILTERED.length) {
+    ['hmSync', 'hmGrupo', 'hmArchivo'].forEach(id => { $(id).innerHTML = '<span class="panel__hint">Sin datos</span>'; });
+    return;
+  }
+
+  const plazasSorted = arr => Array.from(arr.entries()).sort((a, b) => b[1] - a[1]).map(([k]) => k);
+
+  const mSync = buildMatrix(FILTERED, 'plaza', 'sync', metric);
+  const syncOrder = ['Sincronizado', 'Sin referencia', 'Desactualizado'];
+  renderHeatmap('hmSync', 'hmSyncHint', plazasSorted(mSync.rows), syncOrder, mSync, {
+    'Sincronizado': RGB.green, 'Sin referencia': RGB.gray, 'Desactualizado': RGB.red
+  }, metric);
+
+  const mGrupo = buildMatrix(FILTERED, 'plaza', 'grupo', metric);
+  const gruposTop = Array.from(mGrupo.cols.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k]) => k);
+  renderHeatmap('hmGrupo', 'hmGrupoHint', plazasSorted(mGrupo.rows), gruposTop, mGrupo, { _: RGB.indigo }, metric);
+
+  const mArch = buildMatrix(FILTERED, 'archivo', 'plaza', metric);
+  const archTop = Array.from(mArch.rows.entries()).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([k]) => k);
+  const plazasOrder = Array.from(mArch.cols.entries()).sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  renderHeatmap('hmArchivo', 'hmArchivoHint', archTop, plazasOrder, mArch, { _: RGB.cyan }, metric);
+}
+
+/* ============================ Filtros activos ============================ */
+
+function addChip(host, label, value, onRemove) {
+  const chip = document.createElement('span');
+  chip.className = 'active-chip';
+  chip.innerHTML = '<b>' + esc(label) + '</b><span class="active-chip__x" title="Quitar filtro">✕</span>';
+  chip.querySelector('.active-chip__x').addEventListener('click', () => { onRemove(value); applyFilters(); });
+  host.appendChild(chip);
+}
+
+function renderActiveFilters() {
+  const host = $('activeFilters');
+  host.innerHTML = '';
+  let any = false;
+  for (const [key, label] of [['plaza', 'Plaza'], ['grupo', 'Grupo'], ['computadora', 'Sucursal'], ['archivo', 'Archivo']]) {
+    state.selected[key].forEach(v => { any = true; addChip(host, label, v, () => state.selected[key].delete(v)); });
+  }
+  state.sync.forEach(v => { any = true; addChip(host, 'Sync', v, () => state.sync.delete(v)); });
+  state.online.forEach(v => { any = true; addChip(host, 'Estado', v === 'online' ? 'Online' : 'Offline', () => state.online.delete(v)); });
+  state.tipo.forEach(v => { any = true; addChip(host, 'Tipo', TIPO_LABEL[v], () => state.tipo.delete(v)); });
+  state.cat.forEach(v => { any = true; addChip(host, 'Catálogo', v, () => state.cat.delete(v)); });
+  state.ext.forEach(v => { any = true; addChip(host, 'Ext', v, () => state.ext.delete(v)); });
+  if (state.query) { any = true; addChip(host, 'Buscar', state.query, () => { state.query = ''; $('searchQuery').value = ''; }); }
+  if (state.minSize !== null && state.minSize !== '') { any = true; addChip(host, 'Min', fmtNum(+state.minSize) + ' KB', () => { state.minSize = null; $('minSize').value = ''; }); }
+  if (state.maxSize !== null && state.maxSize !== '') { any = true; addChip(host, 'Max', fmtNum(+state.maxSize) + ' KB', () => { state.maxSize = null; $('maxSize').value = ''; }); }
+  if (state.fromDate) { any = true; addChip(host, 'Desde', state.fromDate, () => { state.fromDate = null; $('fromDate').value = ''; }); }
+  if (state.toDateEnd) { any = true; addChip(host, 'Hasta', state.toDateEnd, () => { state.toDateEnd = null; $('toDate').value = ''; }); }
+  if (!any) host.innerHTML = '<span class="empty-hint">Sin filtros — mostrando todos los datos</span>';
+}
+
+/* ============================ Render global ============================ */
+
+function renderAll() {
+  renderKPIs();
+  renderCharts();
+  renderPlazaTable();
+  renderRanking();
+  renderDetailTable();
+  renderEquiposKPIs();
+  renderEquiposCharts();
+  renderEquiposTable();
+  renderHeatmaps();
+  const vendRows = FILTERED.filter(r => r.tipo === 'vendedor');
+  renderVendedoresKPIs(vendRows);
+  renderVendCharts(vendRows);
+  renderTipoTable('tblVendedores', vendRows);
+  const cedRows = FILTERED.filter(r => r.tipo === 'cedis');
+  renderCedisKPIs(cedRows);
+  renderCedisCharts(cedRows);
+  renderTipoTable('tblCedis', cedRows);
+  updateSortArrows();
+}
+
+/* ============================ Export CSV ============================ */
+
+function exportCSV() {
+  if (!FILTERED.length) { toast('No hay datos para exportar', true); return; }
+  const cols = ['archivo', 'computadora', 'plaza', 'grupo', 'tipo', 'estado', 'ultima_conexion', 'tamano_kb', 'ultima_modificacion', 'md5', 'estado_archivo', 'sincronizacion', 'ruta_rbf', 'hash_rbf'];
+  const head = cols.join(',');
+  const body = FILTERED.map(r => cols.map(c => {
+    const v = c === 'sincronizacion' ? r.sync : c === 'tipo' ? TIPO_LABEL[r.tipo] : r[c];
+    const s = String(v ?? '');
+    return /[",\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',')).join('\n');
+  const blob = new Blob(['\uFEFF' + head + '\n' + body], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'reporte-dbf-' + ts + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 500);
+  toast('CSV exportado (' + fmtNum(FILTERED.length) + ' registros)');
+}
+
+/* ============================ Carga de datos ============================ */
+
+async function loadData(initial) {
+  const loader = $('loader');
+  const btn = $('btnRefresh');
+  if (initial) loader.classList.remove('is-hidden');
+  btn.classList.add('is-loading', 'is-refreshing');
+  btn.disabled = true;
+  $('lastUpdate').textContent = 'Actualizando…';
   try {
     const res = await fetch(API_URL);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const json = await res.json();
     DATA = (json.data || []).map(enrich);
     buildFilterOptions();
-    resetFilters();
+    if (initial) { resetFilters(); try { const t = localStorage.getItem('dbf-tab'); if (t) switchTab(t); } catch (e) {} }
     applyFilters();
-    renderAll();
-    document.getElementById('lastUpdate').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-MX');
-    document.getElementById('footerTime').textContent = 'Reporte del ' + new Date().toLocaleString('es-MX');
-    toast('Datos cargados: ' + fmtNum(DATA.length) + ' registros');
+    markLoaded(initial);
   } catch (e) {
-    document.getElementById('kpiGrid').innerHTML =
-      '<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px;color:var(--red)">' +
-      'No se pudo conectar con la API.<br><code style="font-size:.8rem;color:var(--muted)">' + esc(API_URL) + '</code><br>' +
-      '<span style="color:var(--muted);font-size:.82rem">' + esc(e.message) + '</span></div>';
-    toast('Error al consultar la API: ' + e.message, true);
+    console.error('Error cargando datos:', e);
+    if (initial) {
+      $('kpiGrid').innerHTML = '<div class="panel" style="grid-column:1/-1"><h3 class="panel__title" style="color:var(--red)">No se pudo conectar con el origen de datos</h3><p class="panel__desc">' + esc(e.message) + '</p><p class="panel__desc">Verifica la conexión y pulsa “Refrescar”.</p></div>';
+      $('resultCount').textContent = '— registros';
+    } else {
+      $('lastUpdate').textContent = 'Última actualización ' + new Date().toLocaleTimeString('es-MX') + ' (falló el refresco)';
+    }
+    toast('No se pudieron obtener los datos: ' + e.message, true);
   } finally {
-    loader.classList.add('is-hidden');
-    btn.classList.remove('is-loading');
+    if (initial) loader.classList.add('is-hidden');
+    btn.classList.remove('is-loading', 'is-refreshing');
+    btn.disabled = false;
   }
 }
 
-function enrich(r) {
-  const archivo = r.archivo || '';
-  const ext = archivo.includes('.') ? archivo.split('.').pop().toUpperCase() : '';
-  const rbf = r.ruta_rbf;
-  const centralCat = rbf ? String(rbf).split('/').filter(Boolean)[1] || null : null;
-  const fileCat = ext === 'EXE' ? 'exe' : /quickbck/i.test(archivo) ? 'quickbck' : 'other';
-  let sync;
-  if (!rbf) sync = 'Sin referencia';
-  else if (r.md5 && r.hash_rbf && String(r.md5).toUpperCase() === String(r.hash_rbf).toUpperCase()) sync = 'Sincronizado';
-  else sync = 'Desactualizado';
-  return Object.assign({}, r, {
-    ext,
-    centralCat,
-    fileCat,
-    sync,
-    computadora: r.computadora || 'N/D',
-    modDate: parseModDate(r.ultima_modificacion),
-    connDate: parseConnDate(r.ultima_conexion),
-  });
+function markLoaded(initial) {
+  const now = new Date();
+  $('lastUpdate').textContent = (initial ? '' : 'Actualizado ') + now.toLocaleTimeString('es-MX');
+  $('footerTime').textContent = 'Reporte del ' + now.toLocaleDateString('es-MX') + ' · ' + fmtNum(DATA.length) + ' registros';
+  nextRefreshAt = Date.now() + REFRESH_MS;
+  if (!autoTimer) autoTimer = setInterval(() => loadData(false), REFRESH_MS);
+  toast((initial ? 'Datos cargados: ' : 'Datos actualizados: ') + fmtNum(DATA.length) + ' registros');
 }
 
-/* ---------- opciones de filtro ---------- */
+/* ============================ Tema ============================ */
 
-function buildFilterOptions() {
-  const countBy = (get) => {
-    const m = new Map();
-    for (const r of DATA) {
-      const k = get(r);
-      m.set(k, (m.get(k) || 0) + 1);
-    }
-    return m;
-  };
-  createMultiselect('msPlaza', 'plaza', 'Plaza', sortCounts(countBy((r) => r.plaza), false));
-  createMultiselect('msGrupo', 'grupo', 'Grupo', sortCounts(countBy((r) => r.grupo), false));
-  createMultiselect('msComputadora', 'computadora', 'Computadora', sortCounts(countBy((r) => r.computadora), true));
-  createMultiselect('msArchivo', 'archivo', 'Archivo', sortCounts(countBy((r) => r.archivo), true));
-
-  createChips('chipsSync', [
-    { v: 'Sincronizado', label: '✓ Sincronizado', cls: 'chip--green' },
-    { v: 'Sin referencia', label: 'Sin referencia', cls: '' },
-    { v: 'Desactualizado', label: '✗ Desactualizado', cls: 'chip--red' },
-  ], state.sync);
-
-  createChips('chipsOnline', [
-    { v: 'online', label: '● Online', cls: 'chip--green' },
-    { v: 'offline', label: '○ Offline', cls: 'chip--red' },
-  ], state.online);
-
-  const catCounts = countBy((r) => r.centralCat);
-  createChips('chipsCat', Array.from(catCounts.entries())
-    .filter(([k]) => k)
-    .sort((a, b) => b[1] - a[1])
-    .map(([v]) => ({ v, label: v })), state.cat);
-
-  createChips('chipsExt', Array.from(countBy((r) => r.ext).entries())
-    .filter(([k]) => k)
-    .sort((a, b) => b[1] - a[1])
-    .map(([v]) => ({ v, label: v })), state.ext);
-}
-
-function sortCounts(map, alpha) {
-  const arr = Array.from(map.entries()).filter(([k]) => k);
-  if (alpha) arr.sort((a, b) => String(a[0]).localeCompare(String(b[0]), 'es'));
-  else arr.sort((a, b) => b[1] - a[1]);
-  return arr;
-}
-
-/* ---------- multiselect ---------- */
-
-function createMultiselect(hostId, key, label, options) {
-  const host = document.getElementById(hostId);
-  host.innerHTML = '';
-  host.classList.remove('ms');
-  host.classList.add('ms');
-  const selected = state.selected[key];
-
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'ms__toggle';
-  toggle.innerHTML = '<span class="ms__toggle-label">' + esc(label) + '</span>' +
-    '<span class="ms__toggle-count">0</span><span class="ms__caret">▼</span>';
-
-  const menu = document.createElement('div');
-  menu.className = 'ms__menu';
-  const search = document.createElement('input');
-  search.className = 'ms__search';
-  search.placeholder = 'Buscar ' + label.toLowerCase() + '…';
-  const listEl = document.createElement('div');
-  listEl.className = 'ms__options';
-  menu.appendChild(search);
-  menu.appendChild(listEl);
-
-  const selAll = document.createElement('button');
-  selAll.type = 'button';
-  selAll.className = 'ms__select-all';
-  selAll.textContent = 'Seleccionar todas';
-  menu.appendChild(selAll);
-
-  host.appendChild(toggle);
-  host.appendChild(menu);
-
-  const updateLabel = () => {
-    const n = selected.size;
-    toggle.querySelector('.ms__toggle-label').textContent = n === 0 ? label + ' (todas)' : label + ' (' + n + ')';
-    toggle.querySelector('.ms__toggle-count').textContent = n === 0 ? 'Todas' : String(n);
-  };
-
-  const renderOptions = () => {
-    const q = search.value.toLowerCase();
-    listEl.innerHTML = '';
-    let shown = 0;
-    for (const [value, count] of options) {
-      if (q && !String(value).toLowerCase().includes(q)) continue;
-      shown++;
-      const o = document.createElement('label');
-      o.className = 'ms__option';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = selected.has(value);
-      cb.addEventListener('change', () => {
-        if (cb.checked) selected.add(value);
-        else selected.delete(value);
-        if (selected.size === options.length) selected.clear();
-        updateLabel();
-        onFilterChange();
-      });
-      o.appendChild(cb);
-      const span = document.createElement('span');
-      span.textContent = value;
-      o.appendChild(span);
-      const b = document.createElement('b');
-      b.textContent = fmtNum(count);
-      o.appendChild(b);
-      listEl.appendChild(o);
-    }
-    if (!shown) {
-      const e = document.createElement('div');
-      e.className = 'ms__empty';
-      e.textContent = 'Sin resultados';
-      listEl.appendChild(e);
-    }
-  };
-
-  selAll.addEventListener('click', () => {
-    selected.clear();
-    updateLabel();
-    renderOptions();
-    onFilterChange();
-  });
-
-  toggle.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    const isOpen = host.classList.contains('is-open');
-    closeAllMenus();
-    if (!isOpen) {
-      host.classList.add('is-open');
-      search.focus();
-    }
-    renderOptions();
-  });
-
-  search.addEventListener('input', renderOptions);
-  search.addEventListener('click', (e) => e.stopPropagation());
-  menu.addEventListener('click', (e) => e.stopPropagation());
-
-  updateLabel();
-  renderOptions();
-}
-
-function closeAllMenus() {
-  document.querySelectorAll('.ms.is-open').forEach((el) => el.classList.remove('is-open'));
-}
-
-document.addEventListener('click', () => closeAllMenus());
-
-/* ---------- chips ---------- */
-
-function createChips(id, opts, selected) {
-  const host = document.getElementById(id);
-  host.innerHTML = '';
-  for (const o of opts) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'chip ' + o.cls;
-    b.textContent = o.label;
-    b.addEventListener('click', () => {
-      if (selected.has(o.v)) selected.delete(o.v);
-      else selected.add(o.v);
-      b.classList.toggle('is-active', selected.has(o.v));
-      onFilterChange();
-    });
-    host.appendChild(b);
-  }
-  selected.forEach((v) => {
-    const b = Array.from(host.children).find((c) => c.textContent && c.textContent.includes(v) || (v === 'online' && c.textContent.includes('Online')) || (v === 'offline' && c.textContent.includes('Offline')));
-    if (b) b.classList.add('is-active');
-  });
-}
-
-/* ---------- filtrado ---------- */
-
-function readControls() {
-  const val = (id) => document.getElementById(id).value;
-  const v = (id) => (val(id) === '' ? null : parseFloat(val(id)));
-  state.query = val('searchQuery');
-  state.minSize = v('minSize');
-  state.maxSize = v('maxSize');
-  const fd = val('fromDate');
-  const td = val('toDate');
-  state.fromDate = fd ? new Date(fd + 'T00:00:00') : null;
-  state.toDateEnd = td ? new Date(new Date(td + 'T00:00:00').getTime() + 86399999) : null;
-}
-
-function matches(r) {
-  const s = state.selected;
-  if (s.plaza.size && !s.plaza.has(r.plaza)) return false;
-  if (s.grupo.size && !s.grupo.has(r.grupo)) return false;
-  if (s.computadora.size && !s.computadora.has(r.computadora)) return false;
-  if (s.archivo.size && !s.archivo.has(r.archivo)) return false;
-  if (state.sync.size && !state.sync.has(r.sync)) return false;
-  if (state.online.size && !state.online.has(r.estado)) return false;
-  if (state.cat.size && !state.cat.has(r.centralCat)) return false;
-  if (state.ext.size && !state.ext.has(r.ext)) return false;
-  if (state.query) {
-    const q = state.query.toLowerCase();
-    const hay = [r.archivo, r.md5, r.hash_rbf, r.ruta, r.ruta_rbf, r.computadora, r.plaza, r.grupo].join(' ').toLowerCase();
-    if (!hay.includes(q)) return false;
-  }
-  if (state.minSize != null && r.tamano_kb < state.minSize) return false;
-  if (state.maxSize != null && r.tamano_kb > state.maxSize) return false;
-  if (state.fromDate && (!r.modDate || r.modDate < state.fromDate)) return false;
-  if (state.toDateEnd && (!r.modDate || r.modDate > state.toDateEnd)) return false;
-  return true;
-}
-
-function applyFilters() {
-  FILTERED = DATA.filter(matches);
-  if (state.page > Math.max(1, Math.ceil(FILTERED.length / state.perPage))) state.page = 1;
-}
-
-function onFilterChange() {
-  applyFilters();
+function applyTheme(theme, persist) {
+  const t = theme || document.documentElement.dataset.theme || 'dark';
+  document.documentElement.dataset.theme = t;
+  if (persist) { try { localStorage.setItem('dbf-theme', t); } catch (e) {} }
+  chartDefaults();
   renderAll();
 }
 
-/* ---------- render: KPIs ---------- */
+/* ============================ Tabs ============================ */
 
-function renderKPIs() {
-  const total = FILTERED.length;
-  const conRef = FILTERED.filter((r) => r.centralCat).length;
-  const sinRef = total - conRef;
-  const syncCount = FILTERED.filter((r) => r.sync === 'Sincronizado').length;
-  const desact = FILTERED.filter((r) => r.sync === 'Desactualizado').length;
-  const coverage = total ? (conRef / total) * 100 : 0;
-  const sizeKb = FILTERED.reduce((a, r) => a + (r.tamano_kb || 0), 0);
-
-  const compSet = new Map();
-  for (const r of FILTERED) {
-    const c = compSet.get(r.computadora) || { online: false };
-    if (r.estado === 'online') c.online = true;
-    compSet.set(r.computadora, c);
-  }
-  let online = 0, offline = 0;
-  compSet.forEach((c) => (c.online ? online++ : offline++));
-
-  const cards = [
-    { label: 'Archivos monitoreados', value: total, sub: 'registros en el reporte', icon: 'files', cls: 'kpi--accent' },
-    { label: 'Con referencia central', value: conRef, sub: 'publicados por Sistemas', icon: 'ref', cls: 'kpi--blue' },
-    { label: 'Sincronizados', value: syncCount, sub: 'hash coincide con RBF', icon: 'check', cls: 'kpi--green' },
-    { label: 'Sin referencia', value: sinRef, sub: 'locales / no aplican', icon: 'slash', cls: 'kpi--purple' },
-    { label: 'Cobertura de referencia', value: coverage.toFixed(1) + '%', sub: 'del total filtrado', icon: 'gauge', cls: 'kpi--amber' },
-    { label: 'Equipos online', value: online, sub: 'sucursales conectadas', icon: 'online', cls: 'kpi--green' },
-    { label: 'Equipos offline', value: offline, sub: 'sin conexión reciente', icon: 'online', cls: 'kpi--red' },
-    { label: 'Tamaño total', value: fmtSize(sizeKb), sub: 'suma de archivos', icon: 'hdd', cls: 'kpi--purple' },
-  ];
-
-  const grid = document.getElementById('kpiGrid');
-  grid.innerHTML = cards.map((c, i) =>
-    '<div class="kpi-card ' + c.cls + '" style="animation-delay:' + (i * 0.06) + 's">' +
-    '<div class="kpi-card__icon">' + svgIcon(c.icon, 18) + '</div>' +
-    '<div class="kpi-card__label">' + c.label + '</div>' +
-    '<div class="kpi-card__value" data-kpi="' + i + '">' + esc(c.value) + '</div>' +
-    '<div class="kpi-card__sub">' + c.sub + '</div></div>'
-  ).join('');
-
-  cards.forEach((c, i) => {
-    if (typeof c.value === 'number') countUp(grid.querySelector('[data-kpi="' + i + '"]'), c.value);
+function switchTab(name) {
+  activeTab = name;
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('is-active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('is-active', p.id === 'tab-' + name));
+  try { localStorage.setItem('dbf-tab', name); } catch (e) {}
 }
 
-function countUp(el, target) {
-  const dur = 900;
-  const t0 = performance.now();
-  const step = (t) => {
-    const p = Math.min(1, (t - t0) / dur);
-    const eased = 1 - Math.pow(1 - p, 3);
-    el.textContent = fmtNum(target * eased);
-    if (p < 1) requestAnimationFrame(step);
-    else el.textContent = fmtNum(target);
-  };
-  requestAnimationFrame(step);
-}
-
-/* ---------- render: gráficas ---------- */
-
-function chartDefaults() {
-  Chart.defaults.color = '#8a92a8';
-  Chart.defaults.borderColor = 'rgba(255,255,255,0.06)';
-  Chart.defaults.font.family = '"Inter", system-ui, sans-serif';
-  Chart.defaults.font.size = 11;
-  Chart.defaults.plugins.legend.labels.boxWidth = 12;
-  Chart.defaults.plugins.legend.labels.boxHeight = 12;
-  Chart.defaults.plugins.legend.labels.usePointStyle = true;
-  Chart.defaults.plugins.legend.labels.pointStyle = 'circle';
-}
-
-const centerText = {
-  id: 'centerText',
-  afterDraw(chart) {
-    if (!chart.options.centerText) return;
-    const meta = chart.getDatasetMeta(0);
-    if (!meta.data.length) return;
-    const total = chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-    const { ctx, chartArea } = chart;
-    const x = chartArea.left + (chartArea.right - chartArea.left) / 2;
-    const y = chartArea.top + (chartArea.bottom - chartArea.top) / 2;
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#e8ebf5';
-    ctx.font = '700 22px Inter, sans-serif';
-    ctx.fillText(fmtNum(total), x, y);
-    ctx.fillStyle = '#8a92a8';
-    ctx.font = '600 11px Inter, sans-serif';
-    ctx.fillText(chart.options.centerText, x, y + 20);
-    ctx.restore();
-  },
-};
-
-function renderChart(key, canvasId, config, empty) {
-  if (charts[key]) { charts[key].destroy(); delete charts[key]; }
-  const wrap = document.getElementById(canvasId).parentElement;
-  const canvas = document.getElementById(canvasId);
-  wrap.querySelector('.chart-card__empty')?.remove();
-  if (empty) {
-    canvas.style.display = 'none';
-    const note = document.createElement('p');
-    note.className = 'chart-card__empty';
-    note.textContent = 'Sin datos con los filtros actuales';
-    wrap.appendChild(note);
-    return;
-  }
-  canvas.style.display = '';
-  charts[key] = new Chart(canvas, config);
-}
-
-function renderCharts() {
-  const total = FILTERED.length;
-  if (!total) {
-    ['chartSync', 'chartCat', 'chartExt', 'chartPlaza', 'chartActivity', 'chartHeavy', 'chartOffline'].forEach((id, i) =>
-      renderChart('c' + i, id, null, true));
-    return;
-  }
-
-  const bySync = [['Sincronizado', 0], ['Sin referencia', 0], ['Desactualizado', 0]];
-  for (const r of FILTERED) {
-    const i = bySync.findIndex(([k]) => k === r.sync);
-    if (i >= 0) bySync[i][1]++;
-  }
-  renderChart('sync', 'chartSync', {
-    type: 'doughnut',
-    data: {
-      labels: bySync.map(([k]) => k),
-      datasets: [{ data: bySync.map(([, v]) => v), backgroundColor: ['#34d399', '#3b4260', '#f87171'], borderColor: 'transparent', borderWidth: 0, hoverOffset: 8 }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 800, easing: 'easeOutQuart' },
-      plugins: { legend: { position: 'bottom' } },
-      cutout: '68%',
-      centerText: 'archivos',
-    },
-    plugins: [centerText],
-  }, bySync[1][1] + bySync[2][1] === 0);
-
-  const catMap = new Map();
-  for (const r of FILTERED) if (r.centralCat) catMap.set(r.centralCat, (catMap.get(r.centralCat) || 0) + 1);
-  const cats = Array.from(catMap.entries()).sort((a, b) => b[1] - a[1]);
-  renderChart('cat', 'chartCat', {
-    type: 'doughnut',
-    data: {
-      labels: cats.map(([k]) => k),
-      datasets: [{ data: cats.map(([, v]) => v), backgroundColor: PALETTE, borderColor: 'transparent', borderWidth: 0, hoverOffset: 8 }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 800, easing: 'easeOutQuart' },
-      plugins: { legend: { position: 'bottom' } },
-      cutout: '68%',
-    },
-  }, cats.length === 0);
-
-  const extMap = new Map();
-  for (const r of FILTERED) if (r.ext) extMap.set(r.ext, (extMap.get(r.ext) || 0) + 1);
-  const exts = Array.from(extMap.entries()).sort((a, b) => b[1] - a[1]);
-  renderChart('ext', 'chartExt', {
-    type: 'doughnut',
-    data: {
-      labels: exts.map(([k]) => k),
-      datasets: [{ data: exts.map(([, v]) => v), backgroundColor: ['#6366f1', '#22d3ee', '#fbbf24', '#a78bfa', '#f87171', '#60a5fa', '#fb923c', '#f472b6', '#34d399', '#94a3b8'], borderColor: 'transparent', borderWidth: 0, hoverOffset: 8 }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 800, easing: 'easeOutQuart' },
-      plugins: { legend: { position: 'bottom' } },
-      cutout: '68%',
-    },
-  }, exts.length === 0);
-
-  const plazaMap = new Map();
-  for (const r of FILTERED) {
-    const p = r.plaza || 'N/A';
-    const d = plazaMap.get(p) || { conRef: 0, sinRef: 0 };
-    if (r.centralCat) d.conRef++; else d.sinRef++;
-    plazaMap.set(p, d);
-  }
-  const plazas = Array.from(plazaMap.entries()).sort((a, b) => (b[1].conRef + b[1].sinRef) - (a[1].conRef + a[1].sinRef));
-  renderChart('plaza', 'chartPlaza', {
-    type: 'bar',
-    data: {
-      labels: plazas.map(([k]) => k),
-      datasets: [
-        { label: 'Con referencia', data: plazas.map(([, v]) => v.conRef), backgroundColor: '#22d3ee', borderRadius: 3, maxBarThickness: 26 },
-        { label: 'Sin referencia', data: plazas.map(([, v]) => v.sinRef), backgroundColor: 'rgba(138,146,168,0.45)', borderRadius: 3, maxBarThickness: 26 },
-      ],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 800, easing: 'easeOutQuart' },
-      plugins: { legend: { position: 'bottom' }, tooltip: { mode: 'index', intersect: false } },
-      scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, beginAtZero: true } },
-    },
-  }, plazas.length === 0);
-
-  const now = new Date();
-  const labels = [], counts = [];
-  for (let i = 13; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-    labels.push(d.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit' }));
-    counts.push(0);
-  }
-  for (const r of FILTERED) {
-    if (!r.modDate) continue;
-    const diff = Math.floor((new Date(r.modDate.getFullYear(), r.modDate.getMonth(), r.modDate.getDate()).getTime() - new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86400000);
-    const idx = 13 - diff;
-    if (idx >= 0 && idx <= 13) counts[idx]++;
-  }
-  const ctx = document.getElementById('chartActivity').getContext('2d');
-  const grad = ctx.createLinearGradient(0, 0, 0, 340);
-  grad.addColorStop(0, 'rgba(99,102,241,0.45)');
-  grad.addColorStop(1, 'rgba(99,102,241,0.02)');
-  renderChart('activity', 'chartActivity', {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Archivos modificados',
-        data: counts,
-        borderColor: '#6366f1',
-        backgroundColor: grad,
-        fill: true,
-        tension: 0.35,
-        pointRadius: 2.5,
-        pointHoverRadius: 5,
-        pointBackgroundColor: '#a5b4fc',
-        borderWidth: 2,
-      }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 900, easing: 'easeOutQuart' },
-      plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
-      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } }, y: { beginAtZero: true } },
-    },
-  }, false);
-
-  const heavyMap = new Map();
-  for (const r of FILTERED) {
-    const d = heavyMap.get(r.archivo) || { size: 0, count: 0 };
-    d.size += r.tamano_kb || 0;
-    d.count++;
-    heavyMap.set(r.archivo, d);
-  }
-  const heavy = Array.from(heavyMap.entries()).sort((a, b) => b[1].size - a[1].size).slice(0, 10);
-  const heavyMax = heavy.length ? heavy[0][1].size : 1;
-  renderChart('heavy', 'chartHeavy', {
-    type: 'bar',
-    data: {
-      labels: heavy.map(([k]) => k.length > 22 ? k.slice(0, 20) + '…' : k),
-      datasets: [{
-        label: 'Tamaño',
-        data: heavy.map(([, v]) => +(v.size / 1024).toFixed(1)),
-        backgroundColor: heavy.map((_, i) => `hsla(${230 - i * 14}, 85%, 62%, 0.9)`),
-        borderRadius: 4,
-        maxBarThickness: 18,
-      }],
-    },
-    options: {
-      indexAxis: 'y',
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 900, easing: 'easeOutQuart' },
-      plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { label: (c) => ' ' + c.parsed.x + ' MB · ' + fmtNum(heavy[c.dataIndex][1].count) + ' archivos' } },
-      },
-      scales: { x: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.05)' } }, y: { grid: { display: false } } },
-    },
-  }, heavy.length === 0);
-
-  const offMap = new Map();
-  const seenComp = new Map();
-  for (const r of FILTERED) {
-    const key = r.computadora;
-    const cur = seenComp.get(key) || { online: false, plaza: r.plaza || 'N/A' };
-    if (r.estado === 'online') cur.online = true;
-    seenComp.set(key, cur);
-  }
-  seenComp.forEach((c) => {
-    if (!c.online) offMap.set(c.plaza, (offMap.get(c.plaza) || 0) + 1);
-  });
-  const offs = Array.from(offMap.entries()).sort((a, b) => b[1] - a[1]);
-  renderChart('offline', 'chartOffline', {
-    type: 'bar',
-    data: {
-      labels: offs.map(([k]) => k),
-      datasets: [{ label: 'Equipos offline', data: offs.map(([, v]) => v), backgroundColor: '#f87171', borderRadius: 4, maxBarThickness: 20 }],
-    },
-    options: {
-      indexAxis: 'y',
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 900, easing: 'easeOutQuart' },
-      plugins: { legend: { display: false } },
-      scales: { x: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: 'rgba(255,255,255,0.05)' } }, y: { grid: { display: false } } },
-    },
-  }, offs.length === 0);
-}
-
-/* ---------- render: tablas ---------- */
-
-function renderTables() {
-  renderPlazaTable();
-  renderDetailTable();
-  renderRanking();
-}
-
-function renderPlazaTable() {
-  const map = new Map();
-  for (const r of FILTERED) {
-    const p = r.plaza || 'N/A';
-    const d = map.get(p) || { total: 0, conRef: 0, sync: 0, online: 0, offline: 0, size: 0 };
-    d.total++;
-    if (r.centralCat) d.conRef++;
-    if (r.sync === 'Sincronizado') d.sync++;
-    if (r.estado === 'online') d.online++; else d.offline++;
-    d.size += r.tamano_kb || 0;
-    map.set(p, d);
-  }
-  const rows = Array.from(map.entries()).sort((a, b) => b[1].total - a[1].total);
-  const tbody = document.querySelector('#tblPlaza tbody');
-  tbody.innerHTML = rows.map(([plaza, d], i) => {
-    const cov = d.total ? (d.conRef / d.total) * 100 : 0;
-    return '<tr style="animation-delay:' + Math.min(i * 0.03, 0.4) + 's">' +
-      '<td><b>' + esc(plaza) + '</b></td>' +
-      '<td class="num">' + fmtNum(d.total) + '</td>' +
-      '<td class="num">' + fmtNum(d.conRef) + '</td>' +
-      '<td class="num mono" style="color:var(--green)">' + fmtNum(d.sync) + '</td>' +
-      '<td class="num muted">' + fmtNum(d.total - d.conRef) + '</td>' +
-      '<td class="num"><span class="badge ' + (cov >= 50 ? 'badge--green' : cov > 0 ? 'badge--amber' : 'badge--red') + '">' + cov.toFixed(1) + '%</span></td>' +
-      '<td class="num" style="color:var(--green)">' + fmtNum(d.online) + '</td>' +
-      '<td class="num" style="color:' + (d.offline ? 'var(--red)' : 'var(--muted)') + '">' + fmtNum(d.offline) + '</td>' +
-      '<td class="num mono">' + fmtSize(d.size) + '</td></tr>';
-  }).join('') || '<tr><td colspan="9" class="muted" style="text-align:center;padding:24px">Sin datos</td></tr>';
-
-  const sum = {
-    total: rows.reduce((a, [, d]) => a + d.total, 0),
-    conRef: rows.reduce((a, [, d]) => a + d.conRef, 0),
-    sync: rows.reduce((a, [, d]) => a + d.sync, 0),
-    online: rows.reduce((a, [, d]) => a + d.online, 0),
-    offline: rows.reduce((a, [, d]) => a + d.offline, 0),
-    size: rows.reduce((a, [, d]) => a + d.size, 0),
-  };
-  document.getElementById('sumTotal').textContent = fmtNum(sum.total);
-  document.getElementById('sumConRef').textContent = fmtNum(sum.conRef);
-  document.getElementById('sumSync').textContent = fmtNum(sum.sync);
-  document.getElementById('sumSinRef').textContent = fmtNum(sum.total - sum.conRef);
-  document.getElementById('sumCover').textContent = (sum.total ? (sum.conRef / sum.total) * 100 : 0).toFixed(1) + '%';
-  document.getElementById('sumOnline').textContent = fmtNum(sum.online);
-  document.getElementById('sumOffline').textContent = fmtNum(sum.offline);
-  document.getElementById('sumSize').textContent = fmtSize(sum.size);
-}
-
-const SYNC_ORDER = { 'Desactualizado': 0, 'Sin referencia': 1, 'Sincronizado': 2 };
-
-function sortRows() {
-  const key = state.sortKey;
-  const dir = state.sortDir === 'asc' ? 1 : -1;
-  return FILTERED.slice().sort((a, b) => {
-    let av, bv;
-    if (key === 'sync') { av = SYNC_ORDER[a.sync] ?? 3; bv = SYNC_ORDER[b.sync] ?? 3; }
-    else if (key === 'modDate') { av = a.modDate ? a.modDate.getTime() : -Infinity; bv = b.modDate ? b.modDate.getTime() : -Infinity; }
-    else if (key === 'tamano_kb') { av = a.tamano_kb || 0; bv = b.tamano_kb || 0; }
-    else { av = String(a[key] ?? '').toLowerCase(); bv = String(b[key] ?? '').toLowerCase(); }
-    if (av === bv) return 0;
-    return (av > bv ? 1 : -1) * dir;
-  });
-}
-
-function renderDetailTable() {
-  const maxSize = Math.max(1, ...FILTERED.map((r) => r.tamano_kb || 0));
-  const sorted = sortRows();
-  const totalPages = Math.max(1, Math.ceil(sorted.length / state.perPage));
-  state.page = Math.min(state.page, totalPages);
-  const start = (state.page - 1) * state.perPage;
-  const page = sorted.slice(start, start + state.perPage);
-
-  document.getElementById('detailRange').textContent = sorted.length
-    ? (start + 1) + '–' + (start + page.length) + ' de ' + fmtNum(sorted.length)
-    : '0 resultados';
-  document.getElementById('pagerInfo').textContent = 'Página ' + state.page + ' / ' + totalPages;
-  document.getElementById('btnPrev').disabled = state.page <= 1;
-  document.getElementById('btnNext').disabled = state.page >= totalPages;
-
-  const tbody = document.querySelector('#tblDetail tbody');
-  tbody.innerHTML = page.map((r, i) => {
-    const syncBadge = r.sync === 'Sincronizado'
-      ? '<span class="badge badge--green">Sincronizado</span>'
-      : r.sync === 'Desactualizado'
-        ? '<span class="badge badge--red">Desactualizado</span>'
-        : '<span class="badge badge--muted">Sin referencia</span>';
-    const onlineBadge = r.estado === 'online'
-      ? '<span class="badge badge--green">Online</span>'
-      : '<span class="badge badge--red">Offline</span>';
-    const pct = Math.min(100, ((r.tamano_kb || 0) / maxSize) * 100);
-    const ref = r.ruta_rbf ? '<span class="mono" title="' + esc(r.ruta_rbf) + '">' + esc(r.ruta_rbf.split('/').filter(Boolean).slice(0, 2).join('/')) + '</span>' : '<span class="muted">—</span>';
-    return '<tr style="animation-delay:' + Math.min(i * 0.02, 0.3) + 's">' +
-      '<td><b>' + esc(r.archivo) + '</b><div class="muted" style="font-size:.7rem">' + esc(r.fileCat === 'other' ? (r.ext || '?') : r.fileCat) + '</div></td>' +
-      '<td>' + esc(r.computadora) + '</td>' +
-      '<td>' + esc(r.plaza) + '</td>' +
-      '<td class="muted">' + esc(r.grupo) + '</td>' +
-      '<td class="num"><div class="size-bar"><span class="mono">' + fmtSize(r.tamano_kb) + '</span><div class="size-bar__track"><div class="size-bar__fill" style="width:' + pct.toFixed(1) + '%"></div></div></div></td>' +
-      '<td>' + syncBadge + '</td>' +
-      '<td>' + onlineBadge + '</td>' +
-      '<td class="muted" title="' + esc(r.ultima_modificacion || '') + '">' + timeAgo(r.modDate) + '</td>' +
-      '<td>' + ref + '</td>' +
-      '<td class="mono muted">' + esc(r.md5 || '—') + '</td></tr>';
-  }).join('') || '<tr><td colspan="10" class="muted" style="text-align:center;padding:28px">Sin resultados con los filtros actuales</td></tr>';
-
-  document.querySelectorAll('#tblDetail th.sortable').forEach((th) => {
-    const active = th.dataset.sort === state.sortKey;
-    th.classList.toggle('is-sorted', active);
-    th.querySelector('.sort-arrow').textContent = active ? (state.sortDir === 'asc' ? '▲' : '▼') : '↕';
-  });
-}
-
-function renderRanking() {
-  const map = new Map();
-  for (const r of FILTERED) {
-    const k = r.computadora;
-    const d = map.get(k) || { plaza: r.plaza || 'N/A', total: 0, conRef: 0, sync: 0, offline: 0 };
-    d.total++;
-    if (r.centralCat) d.conRef++;
-    if (r.sync === 'Sincronizado') d.sync++;
-    if (r.estado !== 'online') d.offline++;
-    map.set(k, d);
-  }
-  const rows = Array.from(map.entries()).sort((a, b) => b[1].total - a[1].total).slice(0, 50);
-  const maxTotal = rows.length ? rows[0][1].total : 1;
-  const tbody = document.querySelector('#tblComputers tbody');
-  tbody.innerHTML = rows.map(([comp, d], i) => {
-    const cov = d.total ? (d.conRef / d.total) * 100 : 0;
-    const badge = cov >= 50 ? 'badge--green' : cov > 0 ? 'badge--amber' : 'badge--red';
-    return '<tr style="animation-delay:' + Math.min(i * 0.02, 0.4) + 's">' +
-      '<td class="muted mono">' + (i + 1) + '</td>' +
-      '<td><b>' + esc(comp) + '</b>' + (d.offline ? ' <span class="badge badge--red">offline</span>' : '') + '</td>' +
-      '<td class="muted">' + esc(d.plaza) + '</td>' +
-      '<td class="num">' + fmtNum(d.total) + '</td>' +
-      '<td class="num">' + fmtNum(d.conRef) + '</td>' +
-      '<td class="num muted">' + fmtNum(d.total - d.conRef) + '</td>' +
-      '<td class="num mono" style="color:var(--green)">' + fmtNum(d.sync) + '</td>' +
-      '<td><div class="progress" style="width:110px"><div class="progress__fill" style="width:' + cov.toFixed(1) + '%"></div></div><span class="muted" style="font-size:.7rem">' + cov.toFixed(1) + '%</span></td></tr>';
-  }).join('') || '<tr><td colspan="8" class="muted" style="text-align:center;padding:24px">Sin datos</td></tr>';
-}
-
-/* ---------- render: filtros activos ---------- */
-
-function renderActiveFilters() {
-  const host = document.getElementById('activeFilters');
-  host.innerHTML = '';
-  const add = (label, value, onRemove) => {
-    const span = document.createElement('span');
-    span.className = 'active-chip';
-    span.innerHTML = label + ': <b></b>';
-    span.querySelector('b').textContent = value;
-    if (onRemove) {
-      const x = document.createElement('span');
-      x.className = 'active-chip__x';
-      x.textContent = '×';
-      x.addEventListener('click', onRemove);
-      span.appendChild(x);
-    }
-    host.appendChild(span);
-  };
-  const addSet = (set, label) => {
-    if (!set.size) return;
-    let i = 0;
-    set.forEach((v) => {
-      if (i < 8) {
-        add(label, v, () => { set.delete(v); syncChipUI(); onFilterChange(); });
-        i++;
-      }
-    });
-    if (set.size > i) add(label, '+' + (set.size - i) + ' más', null);
-  };
-  addSet(state.selected.plaza, 'Plaza');
-  addSet(state.selected.grupo, 'Grupo');
-  addSet(state.selected.computadora, 'Sucursal');
-  addSet(state.selected.archivo, 'Archivo');
-  addSet(state.sync, 'Sync');
-  addSet(state.online, 'Estado');
-  addSet(state.cat, 'Catálogo');
-  addSet(state.ext, 'Tipo');
-  if (state.query) add('Búsqueda', state.query, () => { state.query = ''; document.getElementById('searchQuery').value = ''; onFilterChange(); });
-  if (state.minSize != null) add('Tamaño ≥', state.minSize + ' KB', () => { state.minSize = null; document.getElementById('minSize').value = ''; onFilterChange(); });
-  if (state.maxSize != null) add('Tamaño ≤', state.maxSize + ' KB', () => { state.maxSize = null; document.getElementById('maxSize').value = ''; onFilterChange(); });
-  if (state.fromDate) add('Desde', state.fromDate.toLocaleDateString('es-MX'), () => { state.fromDate = null; document.getElementById('fromDate').value = ''; onFilterChange(); });
-  if (state.toDateEnd) add('Hasta', state.toDateEnd.toLocaleDateString('es-MX'), () => { state.toDateEnd = null; document.getElementById('toDate').value = ''; onFilterChange(); });
-
-  if (!host.children.length) {
-    const hint = document.createElement('span');
-    hint.className = 'empty-hint';
-    hint.textContent = 'Sin filtros activos — mostrando todo el reporte.';
-    host.appendChild(hint);
-  }
-}
-
-function activeChip(label, value, onRemove) {
-  const span = document.createElement('span');
-  span.className = 'active-chip';
-  span.innerHTML = label + ': <b></b> <span class="active-chip__x">×</span>';
-  span.querySelector('b').textContent = value;
-  span.querySelector('.active-chip__x').addEventListener('click', onRemove);
-  return span.outerHTML;
-}
-
-function syncChipUI() {
-  document.querySelectorAll('.chips').forEach((host) => {
-    const selMap = { 'chipsSync': state.sync, 'chipsOnline': state.online, 'chipsCat': state.cat, 'chipsExt': state.ext };
-    const sel = selMap[host.id];
-    if (!sel) return;
-    Array.from(host.children).forEach((b) => {
-      const map = {
-        '✓ Sincronizado': 'Sincronizado', 'Sin referencia': 'Sin referencia', '✗ Desactualizado': 'Desactualizado',
-        '● Online': 'online', '○ Offline': 'offline',
-      };
-      const val = map[b.textContent] || b.textContent;
-      b.classList.toggle('is-active', sel.has(val));
-    });
-  });
-}
-
-/* ---------- render: principal ---------- */
-
-function renderAll() {
-  renderKPIs();
-  renderCharts();
-  renderTables();
-  renderActiveFilters();
-  document.getElementById('resultCount').textContent =
-    FILTERED.length < DATA.length
-      ? 'Filtrando ' + fmtNum(FILTERED.length) + ' de ' + fmtNum(DATA.length)
-      : fmtNum(DATA.length) + ' registros';
-}
-
-/* ---------- export CSV ---------- */
-
-function exportCSV() {
-  if (!FILTERED.length) { toast('No hay datos que exportar', true); return; }
-  const cols = ['Computadora', 'ShortKey', 'Plaza', 'Grupo', 'Estado', 'UltimaConexion', 'Archivo', 'Ruta', 'TamanoKB', 'UltimaModificacion', 'MD5', 'Sincronizacion', 'RutaRBF', 'HashRBF', 'CategoriaCentral', 'TipoArchivo'];
-  const lines = [cols.join(',')];
-  for (const r of FILTERED) {
-    lines.push(cols.map((c) => {
-      const v = {
-        Computadora: r.computadora, ShortKey: r.short_key, Plaza: r.plaza, Grupo: r.grupo,
-        Estado: r.estado, UltimaConexion: r.ultima_conexion, Archivo: r.archivo, Ruta: r.ruta,
-        TamanoKB: r.tamano_kb, UltimaModificacion: r.ultima_modificacion, MD5: r.md5,
-        Sincronizacion: r.sync, RutaRBF: r.ruta_rbf, HashRBF: r.hash_rbf,
-        CategoriaCentral: r.centralCat || '', TipoArchivo: r.fileCat,
-      }[c];
-      const s = v == null ? '' : String(v);
-      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-    }).join(','));
-  }
-  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-  const a = document.createElement('a');
-  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16);
-  a.href = URL.createObjectURL(blob);
-  a.download = 'reporte-dbf-' + stamp + '.csv';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  toast('Exportados ' + fmtNum(FILTERED.length) + ' registros a CSV');
-}
-
-/* ---------- inicialización ---------- */
-
-function resetFilters() {
-  Object.values(state.selected).forEach((s) => s.clear());
-  state.sync.clear();
-  state.online.clear();
-  state.cat.clear();
-  state.ext.clear();
-  state.query = '';
-  state.minSize = null;
-  state.maxSize = null;
-  state.fromDate = null;
-  state.toDateEnd = null;
-  state.sortKey = 'sync';
-  state.sortDir = 'asc';
-  state.page = 1;
-  document.getElementById('searchQuery').value = '';
-  document.getElementById('minSize').value = '';
-  document.getElementById('maxSize').value = '';
-  document.getElementById('fromDate').value = '';
-  document.getElementById('toDate').value = '';
-}
+/* ============================ UI bindings ============================ */
 
 function bindUI() {
-  ['searchQuery', 'minSize', 'maxSize', 'fromDate', 'toDate'].forEach((id) => {
-    document.getElementById(id).addEventListener('input', () => { readControls(); onFilterChange(); });
-  });
-  document.getElementById('btnClearAll').addEventListener('click', () => { resetFilters(); syncChipUI(); buildFilterOptions(); onFilterChange(); });
-  document.getElementById('btnRefresh').addEventListener('click', loadData);
-  document.getElementById('btnExport').addEventListener('click', exportCSV);
+  document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 
-  document.querySelectorAll('#tblDetail th.sortable').forEach((th) => {
-    const arrow = document.createElement('span');
-    arrow.className = 'sort-arrow';
-    arrow.textContent = '↕';
-    th.appendChild(arrow);
-    th.addEventListener('click', () => {
-      const key = th.dataset.sort;
-      if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
-      else { state.sortKey = key; state.sortDir = 'asc'; }
-      state.page = 1;
-      renderDetailTable();
-    });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.ms')) closeAllMenus();
   });
 
-  document.getElementById('perPage').addEventListener('change', (e) => {
-    state.perPage = parseInt(e.target.value, 10);
-    state.page = 1;
-    renderDetailTable();
+  $('searchQuery').addEventListener('input', e => { state.query = e.target.value.trim(); state.page = 1; applyFilters(); });
+  $('minSize').addEventListener('input', e => { state.minSize = e.target.value; state.page = 1; applyFilters(); });
+  $('maxSize').addEventListener('input', e => { state.maxSize = e.target.value; state.page = 1; applyFilters(); });
+  $('fromDate').addEventListener('change', e => { state.fromDate = e.target.value || null; state.page = 1; applyFilters(); });
+  $('toDate').addEventListener('change', e => { state.toDateEnd = e.target.value || null; state.page = 1; applyFilters(); });
+  $('perPage').addEventListener('change', e => { state.perPage = +e.target.value; state.page = 1; renderDetailTable(); });
+  $('btnPrev').addEventListener('click', () => { if (state.page > 1) { state.page--; renderDetailTable(); } });
+  $('btnNext').addEventListener('click', () => { state.page++; renderDetailTable(); });
+  $('btnClearAll').addEventListener('click', () => { resetFilters(); buildFilterOptions(); syncChipUI(); applyFilters(); });
+  $('btnRefresh').addEventListener('click', () => loadData(false));
+  $('btnExport').addEventListener('click', exportCSV);
+  $('btnTheme').addEventListener('click', () => {
+    const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    applyTheme(cur, true);
   });
-  document.getElementById('btnPrev').addEventListener('click', () => { if (state.page > 1) { state.page--; renderDetailTable(); } });
-  document.getElementById('btnNext').addEventListener('click', () => {
-    const max = Math.max(1, Math.ceil(FILTERED.length / state.perPage));
-    if (state.page < max) { state.page++; renderDetailTable(); }
-  });
+  $('heatMetric').addEventListener('change', e => { state.heatMetric = e.target.value; renderHeatmaps(); });
 
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeAllMenus();
-  });
+  bindSortables();
+  setInterval(() => {
+    const now = new Date();
+    $('clock').textContent = now.toLocaleTimeString('es-MX');
+    const remain = Math.max(0, nextRefreshAt - Date.now());
+    const mm = String(Math.floor(remain / 60000)).padStart(2, '0');
+    const ss = String(Math.floor((remain % 60000) / 1000)).padStart(2, '0');
+    $('nextRefresh').textContent = 'Auto-refresco en ' + mm + ':' + ss;
+  }, 1000);
 }
 
-function updateClock() {
-  document.getElementById('clock').textContent = new Date().toLocaleTimeString('es-MX', { hour12: false });
-}
+/* ============================ Init ============================ */
 
 function init() {
+  if (!document.documentElement.dataset.theme) document.documentElement.dataset.theme = 'dark';
   chartDefaults();
   bindUI();
-  updateClock();
-  setInterval(updateClock, 1000);
-  loadData();
+  try {
+    const tab = localStorage.getItem('dbf-tab');
+    if (tab) switchTab(tab);
+  } catch (e) {}
+  loadData(true);
 }
 
 document.addEventListener('DOMContentLoaded', init);

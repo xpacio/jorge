@@ -3,12 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard de Sincronización DBF — Sistemas ↔ Sucursales</title>
+<title>Sincronización Sistemas ⇄ Sucursales</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%236366f1'/%3E%3Cpath d='M13 2 3 14h7l-1 8 10-12h-7l1-8z' fill='white'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+  try { var t = localStorage.getItem('dbf-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -24,14 +27,21 @@
       </svg>
     </div>
     <div>
-      <h1 class="brand__title">Sincronización DBF</h1>
-      <p class="brand__sub">Sistemas <span class="brand__arrow">⇄</span> Sucursales remotas</p>
+      <h1 class="brand__title">Sincronización de Sistemas</h1>
+      <p class="brand__sub">Central <span class="brand__arrow">⇄</span> Sucursales remotas</p>
     </div>
   </div>
   <div class="topbar__right">
     <div class="live-clock" id="clock">--:--:--</div>
-    <div class="last-update" id="lastUpdate">Cargando…</div>
-    <button class="btn btn--ghost" id="btnRefresh" title="Volver a consultar la API">
+    <div class="update-stack">
+      <div class="last-update" id="lastUpdate">Cargando…</div>
+      <div class="next-refresh" id="nextRefresh">Auto-refresco en 10:00</div>
+    </div>
+    <button class="btn btn--icon" id="btnTheme" title="Cambiar tema">
+      <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+    <button class="btn btn--ghost" id="btnRefresh" title="Refrescar datos ahora">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
       Refrescar
     </button>
@@ -42,15 +52,21 @@
   </div>
 </header>
 
+<nav class="tabs" id="tabs" role="tablist" aria-label="Secciones">
+  <button class="tab-btn is-active" data-tab="resumen" role="tab" aria-selected="true">Resumen</button>
+  <button class="tab-btn" data-tab="equipos" role="tab" aria-selected="false">Equipos</button>
+  <button class="tab-btn" data-tab="calor" role="tab" aria-selected="false">Mapas de calor</button>
+  <button class="tab-btn" data-tab="vendedores" role="tab" aria-selected="false">Vendedores</button>
+  <button class="tab-btn" data-tab="cedis" role="tab" aria-selected="false">CEDIS</button>
+  <button class="tab-btn" data-tab="detalle" role="tab" aria-selected="false">Detalle</button>
+</nav>
+
 <main class="container">
 
-  <!-- KPIs -->
-  <section class="kpis" id="kpiGrid" aria-label="Indicadores clave"></section>
-
-  <!-- Filtros -->
-  <section class="panel filters" aria-label="Filtros">
+  <!-- Filtros globales -->
+  <section class="panel filters" aria-label="Filtros globales">
     <div class="panel__head">
-      <h2 class="panel__title">Filtros</h2>
+      <h2 class="panel__title">Filtros globales</h2>
       <div class="filters__meta">
         <span class="result-count" id="resultCount">—</span>
         <button class="link-btn" id="btnClearAll">Limpiar todo</button>
@@ -86,12 +102,12 @@
         <div class="chips" id="chipsOnline"></div>
       </div>
       <div class="field">
-        <label class="field__label">Catálogo central</label>
-        <div class="chips" id="chipsCat"></div>
+        <label class="field__label">Tipo de equipo</label>
+        <div class="chips" id="chipsTipo"></div>
       </div>
       <div class="field">
-        <label class="field__label">Tipo de archivo</label>
-        <div class="chips" id="chipsExt"></div>
+        <label class="field__label">Catálogo central</label>
+        <div class="chips" id="chipsCat"></div>
       </div>
     </div>
 
@@ -121,152 +137,324 @@
     <div class="active-filters" id="activeFilters"></div>
   </section>
 
-  <!-- Gráficas -->
-  <section class="charts-grid" aria-label="Gráficas">
-    <div class="panel chart-card chart-card--sync">
-      <h3 class="panel__title">Estado de sincronización</h3>
-      <p class="panel__desc">Archivos con referencia central de Sistemas (hash coincide) vs. locales sin referencia.</p>
-      <div class="chart-wrap"><canvas id="chartSync"></canvas></div>
-    </div>
+  <div class="tab-panels">
 
-    <div class="panel chart-card chart-card--cat">
-      <h3 class="panel__title">Catálogos centrales</h3>
-      <p class="panel__desc">Categorías publicadas por Sistemas vía ruta RBF.</p>
-      <div class="chart-wrap"><canvas id="chartCat"></canvas></div>
-    </div>
+    <!-- ============ RESUMEN ============ -->
+    <section class="tab-panel is-active" id="tab-resumen" role="tabpanel">
+      <section class="kpis" id="kpiGrid" aria-label="Indicadores clave"></section>
 
-    <div class="panel chart-card chart-card--ext">
-      <h3 class="panel__title">Tipos de archivo</h3>
-      <p class="panel__desc">Distribución por extensión en las sucursales.</p>
-      <div class="chart-wrap"><canvas id="chartExt"></canvas></div>
-    </div>
+      <section class="charts-grid" aria-label="Gráficas de resumen">
+        <div class="panel chart-card chart-card--sync">
+          <h3 class="panel__title">Estado de sincronización</h3>
+          <p class="panel__desc">Archivos con referencia central de Sistemas (hash coincide) vs. locales sin referencia.</p>
+          <div class="chart-wrap"><canvas id="chartSync"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--cat">
+          <h3 class="panel__title">Catálogos centrales</h3>
+          <p class="panel__desc">Categorías publicadas por Sistemas vía ruta RBF.</p>
+          <div class="chart-wrap"><canvas id="chartCat"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--ext">
+          <h3 class="panel__title">Tipos de archivo</h3>
+          <p class="panel__desc">Distribución por extensión en las sucursales.</p>
+          <div class="chart-wrap"><canvas id="chartExt"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--plaza">
+          <h3 class="panel__title">Cobertura por plaza</h3>
+          <p class="panel__desc">Archivos con y sin referencia central, apilados por plaza.</p>
+          <div class="chart-wrap chart-wrap--tall"><canvas id="chartPlaza"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--activity">
+          <h3 class="panel__title">Actividad de modificación</h3>
+          <p class="panel__desc">Últimos 14 días, según fecha de modificación de los archivos.</p>
+          <div class="chart-wrap chart-wrap--tall"><canvas id="chartActivity"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--heavy">
+          <h3 class="panel__title">Archivos más pesados</h3>
+          <p class="panel__desc">Top 10 por tamaño agregado (suma en todas las sucursales).</p>
+          <div class="chart-wrap chart-wrap--tall"><canvas id="chartHeavy"></canvas></div>
+        </div>
+      </section>
 
-    <div class="panel chart-card chart-card--plaza">
-      <h3 class="panel__title">Cobertura por plaza</h3>
-      <p class="panel__desc">Archivos con y sin referencia central, apilados por plaza.</p>
-      <div class="chart-wrap chart-wrap--tall"><canvas id="chartPlaza"></canvas></div>
-    </div>
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Resumen por plaza</h3>
+          <span class="panel__hint">Se recalculan con los filtros activos</span>
+        </div>
+        <div class="table-scroll">
+          <table class="table table--summary" id="tblPlaza">
+            <thead>
+              <tr>
+                <th>Plaza</th>
+                <th class="num">Archivos</th>
+                <th class="num">Con referencia</th>
+                <th class="num">Sincronizados</th>
+                <th class="num">Sin referencia</th>
+                <th class="num">% cobertura</th>
+                <th class="num">Online</th>
+                <th class="num">Offline</th>
+                <th class="num">Tamaño</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+            <tfoot><tr class="summary-row"><td>TOTAL</td><td class="num" id="sumTotal">—</td><td class="num" id="sumConRef">—</td><td class="num" id="sumSync">—</td><td class="num" id="sumSinRef">—</td><td class="num" id="sumCover">—</td><td class="num" id="sumOnline">—</td><td class="num" id="sumOffline">—</td><td class="num" id="sumSize">—</td></tr></tfoot>
+          </table>
+        </div>
+      </section>
 
-    <div class="panel chart-card chart-card--activity">
-      <h3 class="panel__title">Actividad de modificación</h3>
-      <p class="panel__desc">Últimos 14 días, según fecha de modificación de los archivos.</p>
-      <div class="chart-wrap chart-wrap--tall"><canvas id="chartActivity"></canvas></div>
-    </div>
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Ranking de sucursales</h3>
+          <span class="panel__hint">Por cantidad de archivos reportados (con barra de cobertura de referencia)</span>
+        </div>
+        <div class="table-scroll">
+          <table class="table table--ranking" id="tblComputers">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Sucursal / Computadora</th>
+                <th>Plaza</th>
+                <th>Tipo</th>
+                <th class="num">Archivos</th>
+                <th class="num">Con ref.</th>
+                <th class="num">Sin ref.</th>
+                <th class="num">Sincronizados</th>
+                <th>Cobertura</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
 
-    <div class="panel chart-card chart-card--heavy">
-      <h3 class="panel__title">Archivos más pesados</h3>
-      <p class="panel__desc">Top 10 por tamaño agregado (suma en todas las sucursales).</p>
-      <div class="chart-wrap chart-wrap--tall"><canvas id="chartHeavy"></canvas></div>
-    </div>
+    <!-- ============ EQUIPOS ============ -->
+    <section class="tab-panel" id="tab-equipos" role="tabpanel">
+      <section class="kpis" id="kpiEquipos" aria-label="Indicadores de equipos"></section>
 
-    <div class="panel chart-card chart-card--offline">
-      <h3 class="panel__title">Equipos sin conexión por plaza</h3>
-      <p class="panel__desc">Sucursales con estado offline (reportan datos históricos).</p>
-      <div class="chart-wrap chart-wrap--tall"><canvas id="chartOffline"></canvas></div>
-    </div>
-  </section>
+      <section class="charts-grid" aria-label="Gráficas de equipos">
+        <div class="panel chart-card">
+          <h3 class="panel__title">Equipos online / offline</h3>
+          <p class="panel__desc">Proporción de sucursales con conexión reciente.</p>
+          <div class="chart-wrap"><canvas id="chartEqStatus"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--plaza">
+          <h3 class="panel__title">Equipos por plaza</h3>
+          <p class="panel__desc">Sucursales conectadas y desconectadas por plaza.</p>
+          <div class="chart-wrap chart-wrap--tall"><canvas id="chartEqPlaza"></canvas></div>
+        </div>
+      </section>
 
-  <!-- Tabla resumen por plaza -->
-  <section class="panel table-panel">
-    <div class="panel__head">
-      <h3 class="panel__title">Resumen por plaza</h3>
-      <span class="panel__hint">Se recalculan con los filtros activos</span>
-    </div>
-    <div class="table-scroll">
-      <table class="table table--summary" id="tblPlaza">
-        <thead>
-          <tr>
-            <th>Plaza</th>
-            <th class="num">Archivos</th>
-            <th class="num">Con referencia</th>
-            <th class="num">Sincronizados</th>
-            <th class="num">Sin referencia</th>
-            <th class="num">% cobertura</th>
-            <th class="num">Online</th>
-            <th class="num">Offline</th>
-            <th class="num">Tamaño</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-        <tfoot><tr class="summary-row"><td>TOTAL</td><td class="num" id="sumTotal">—</td><td class="num" id="sumConRef">—</td><td class="num" id="sumSync">—</td><td class="num" id="sumSinRef">—</td><td class="num" id="sumCover">—</td><td class="num" id="sumOnline">—</td><td class="num" id="sumOffline">—</td><td class="num" id="sumSize">—</td></tr></tfoot>
-      </table>
-    </div>
-  </section>
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Equipos conectados</h3>
+          <span class="panel__hint">Un equipo se considera online si reporta al menos un archivo con estado online</span>
+        </div>
+        <div class="table-scroll">
+          <table class="table table--equipos" id="tblEquipos">
+            <thead>
+              <tr>
+                <th data-sort="computadora" class="sortable">Equipo</th>
+                <th data-sort="plaza" class="sortable">Plaza</th>
+                <th data-sort="grupo" class="sortable">Grupo</th>
+                <th>Tipo</th>
+                <th data-sort="estado" class="sortable">Estado</th>
+                <th data-sort="connDate" class="sortable">Última conexión</th>
+                <th data-sort="total" class="sortable num">Archivos</th>
+                <th data-sort="sync" class="sortable num">Sincronizados</th>
+                <th data-sort="conRef" class="sortable num">Con ref.</th>
+                <th class="num">Cobertura</th>
+                <th data-sort="size" class="sortable num">Tamaño</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
 
-  <!-- Tabla detalle -->
-  <section class="panel table-panel">
-    <div class="panel__head">
-      <h3 class="panel__title">Detalle de archivos</h3>
-      <div class="table-tools">
-        <span class="panel__hint" id="detailRange">—</span>
-        <select class="input input--select" id="perPage">
-          <option value="20">20 / página</option>
-          <option value="50">50 / página</option>
-          <option value="100">100 / página</option>
-        </select>
-      </div>
-    </div>
-    <div class="table-scroll">
-      <table class="table table--detail" id="tblDetail">
-        <thead>
-          <tr>
-            <th data-sort="archivo" class="sortable">Archivo</th>
-            <th data-sort="computadora" class="sortable">Sucursal</th>
-            <th data-sort="plaza" class="sortable">Plaza</th>
-            <th data-sort="grupo" class="sortable">Grupo</th>
-            <th data-sort="tamano_kb" class="sortable num">Tamaño</th>
-            <th data-sort="sync" class="sortable">Sincronización</th>
-            <th data-sort="estado" class="sortable">Equipo</th>
-            <th data-sort="modDate" class="sortable">Modificado</th>
-            <th>Referencia central</th>
-            <th data-sort="md5" class="sortable">MD5</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div class="pager">
-      <button class="btn btn--ghost btn--sm" id="btnPrev">← Anterior</button>
-      <span class="pager__info" id="pagerInfo">—</span>
-      <button class="btn btn--ghost btn--sm" id="btnNext">Siguiente →</button>
-    </div>
-  </section>
+    <!-- ============ MAPAS DE CALOR ============ -->
+    <section class="tab-panel" id="tab-calor" role="tabpanel">
+      <section class="panel heat-controls">
+        <div class="panel__head">
+          <h3 class="panel__title">Mapas de calor</h3>
+          <div class="table-tools">
+            <label class="field__label">Métrica de la celda</label>
+            <select class="input input--select" id="heatMetric">
+              <option value="count">Cantidad de archivos</option>
+              <option value="size">Tamaño (MB)</option>
+            </select>
+          </div>
+        </div>
+        <p class="panel__desc">Intensidad del color = valor de la celda relativo al máximo de la matriz. Pasa el cursor para ver el detalle.</p>
+      </section>
 
-  <!-- Ranking computadoras -->
-  <section class="panel table-panel">
-    <div class="panel__head">
-      <h3 class="panel__title">Ranking de sucursales</h3>
-      <span class="panel__hint">Por cantidad de archivos reportados (con barra de cobertura de referencia)</span>
-    </div>
-    <div class="table-scroll">
-      <table class="table table--ranking" id="tblComputers">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Sucursal / Computadora</th>
-            <th>Plaza</th>
-            <th class="num">Archivos</th>
-            <th class="num">Con ref.</th>
-            <th class="num">Sin ref.</th>
-            <th class="num">Sincronizados</th>
-            <th>Cobertura</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Plaza × Estado de sincronización</h3>
+          <span class="panel__hint" id="hmSyncHint"></span>
+        </div>
+        <div class="heatmap-scroll"><div id="hmSync" class="heatmap"></div></div>
+      </section>
 
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Plaza × Grupo</h3>
+          <span class="panel__hint" id="hmGrupoHint"></span>
+        </div>
+        <div class="heatmap-scroll"><div id="hmGrupo" class="heatmap"></div></div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Archivo × Plaza</h3>
+          <span class="panel__hint" id="hmArchivoHint"></span>
+        </div>
+        <div class="heatmap-scroll"><div id="hmArchivo" class="heatmap"></div></div>
+      </section>
+    </section>
+
+    <!-- ============ VENDEDORES ============ -->
+    <section class="tab-panel" id="tab-vendedores" role="tabpanel">
+      <section class="kpis" id="kpiVendedores" aria-label="Indicadores de vendedores"></section>
+
+      <section class="charts-grid" aria-label="Gráficas de vendedores">
+        <div class="panel chart-card">
+          <h3 class="panel__title">Equipos de venta por plaza</h3>
+          <p class="panel__desc">Distribución de equipos vendedores / B2B / ventas especiales.</p>
+          <div class="chart-wrap"><canvas id="chartVendPlaza"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--plaza">
+          <h3 class="panel__title">Archivos más usados por vendedores</h3>
+          <p class="panel__desc">Top 10 por cantidad de archivos en equipos de venta.</p>
+          <div class="chart-wrap chart-wrap--tall"><canvas id="chartVendFiles"></canvas></div>
+        </div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Equipos de vendedores</h3>
+          <span class="panel__hint">Clasificación: grupos con “Vendedor” + equipos B2B / ventas especiales / corporativas</span>
+        </div>
+        <div class="table-scroll">
+          <table class="table table--vendedores" id="tblVendedores">
+            <thead>
+              <tr>
+                <th>Equipo</th>
+                <th>Plaza</th>
+                <th>Grupo</th>
+                <th>Estado</th>
+                <th class="num">Archivos</th>
+                <th class="num">Con ref.</th>
+                <th class="num">Sin ref.</th>
+                <th class="num">Sincronizados</th>
+                <th>Cobertura</th>
+                <th class="num">Tamaño</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============ CEDIS ============ -->
+    <section class="tab-panel" id="tab-cedis" role="tabpanel">
+      <section class="kpis" id="kpiCedis" aria-label="Indicadores de CEDIS"></section>
+
+      <section class="charts-grid" aria-label="Gráficas de CEDIS">
+        <div class="panel chart-card">
+          <h3 class="panel__title">CEDIS por plaza</h3>
+          <p class="panel__desc">Distribución de registros de centros de almacenamiento/distribución.</p>
+          <div class="chart-wrap"><canvas id="chartCedisPlaza"></canvas></div>
+        </div>
+        <div class="panel chart-card chart-card--plaza">
+          <h3 class="panel__title">Archivos por CEDIS</h3>
+          <p class="panel__desc">Cantidad de archivos por centro de almacenamiento/distribución.</p>
+          <div class="chart-wrap chart-wrap--tall"><canvas id="chartCedisFiles"></canvas></div>
+        </div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Centros de distribución / almacenes</h3>
+          <span class="panel__hint">Clasificación: grupos con “Almacén” + equipos BODEGA / ACTIVO FIJO / gerencia de almacén</span>
+        </div>
+        <div class="table-scroll">
+          <table class="table table--cedis" id="tblCedis">
+            <thead>
+              <tr>
+                <th>Centro</th>
+                <th>Plaza</th>
+                <th>Grupo</th>
+                <th>Estado</th>
+                <th class="num">Archivos</th>
+                <th class="num">Con ref.</th>
+                <th class="num">Sin ref.</th>
+                <th class="num">Sincronizados</th>
+                <th>Cobertura</th>
+                <th class="num">Tamaño</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============ DETALLE ============ -->
+    <section class="tab-panel" id="tab-detalle" role="tabpanel">
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Detalle de archivos</h3>
+          <div class="table-tools">
+            <span class="panel__hint" id="detailRange">—</span>
+            <select class="input input--select" id="perPage">
+              <option value="20">20 / página</option>
+              <option value="50">50 / página</option>
+              <option value="100">100 / página</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="table table--detail" id="tblDetail">
+            <thead>
+              <tr>
+                <th data-sort="archivo" class="sortable">Archivo</th>
+                <th data-sort="computadora" class="sortable">Sucursal</th>
+                <th data-sort="plaza" class="sortable">Plaza</th>
+                <th data-sort="grupo" class="sortable">Grupo</th>
+                <th>Tipo</th>
+                <th data-sort="tamano_kb" class="sortable num">Tamaño</th>
+                <th data-sort="sync" class="sortable">Sincronización</th>
+                <th data-sort="estado" class="sortable">Equipo</th>
+                <th data-sort="modDate" class="sortable">Modificado</th>
+                <th>Referencia central</th>
+                <th data-sort="md5" class="sortable">MD5</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button class="btn btn--ghost btn--sm" id="btnPrev">← Anterior</button>
+          <span class="pager__info" id="pagerInfo">—</span>
+          <button class="btn btn--ghost btn--sm" id="btnNext">Siguiente →</button>
+        </div>
+      </section>
+    </section>
+
+  </div>
 </main>
 
 <footer class="footer">
-  <span>Datos: <code>/api/dbf-report</code> · base <code>http://212.227.6.127:8000</code></span>
-  <span id="footerTime"></span>
+  <span>Panel de monitoreo de sincronización · Central ⇄ Sucursales</span>
+  <span>Actualización automática cada 10 minutos · <span id="footerTime"></span></span>
 </footer>
 
 <div class="loader-overlay" id="loader">
   <div class="spinner"></div>
-  <p>Consultando API y preparando reporte…</p>
+  <p>Cargando reporte…</p>
 </div>
 
 <div class="toast" id="toast"></div>
