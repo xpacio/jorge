@@ -1,6 +1,6 @@
 /* ============================================================
    Dashboard Sincronización DBF — Central ⇄ Sucursales
-   Tabs: Plazas · Resumen · Equipos · Mapas de calor · Vendedores · CEDIS · Detalle
+   Tabs: Plazas · Resumen · Equipos · Mapas de calor · Vendedores · CEDIS · Detalle · Administración
    Auto-refresco 10 min en segundo plano + tema claro/oscuro
    ============================================================ */
 'use strict';
@@ -12,6 +12,11 @@ const SYNC_ORDER = { 'Desactualizado': 0, 'Sin referencia': 1, 'Sincronizado': 2
 const SYNC_COLORS = { 'Sincronizado': '#34d399', 'Sin referencia': '#8a92a8', 'Desactualizado': '#f87171' };
 const TIPO_LABEL = { vendedor: 'Vendedor', cedis: 'CEDIS', tienda: 'Tienda' };
 const TIPO_BADGE = { vendedor: 'badge--blue', cedis: 'badge--amber', tienda: 'badge--muted' };
+
+const SEC_ORDER = { envio: 0, respaldo: 1, monitoreo: 2, ambos: 3 };
+const SEC_LABEL = { envio: 'Envío', respaldo: 'Respaldo', monitoreo: 'Monitoreo', ambos: 'Ambos' };
+const GA_TO_SEC = { other: 'envio', quickbck: 'respaldo', exe: 'monitoreo' };
+const GA_BADGE = { other: 'badge--amber', quickbck: 'badge--green', exe: 'badge--blue' };
 
 const VENDOR_RE = /vendedor|b2b|ventas?\s*(especial|corporativ)?|corporativ|especial/i;
 const VENDOR_NAMES = new Set(['Yasmileth Valenzuela', 'ERVIN MACHADO', 'MELANI FARDO', 'KARINA PICADO', 'Adriana de la Rosa']);
@@ -26,7 +31,9 @@ const state = {
   sortKey: 'sync', sortDir: 'asc',
   eqSortKey: 'computadora', eqSortDir: 'asc',
   page: 1, perPage: 20, heatMetric: 'count',
-  plazaSel: null, syncMode: 'catalogos', plazaQuery: ''
+  plazaSel: null, syncMode: 'catalogos', plazaQuery: '',
+  syncSection: 'todos', adminQuery: '',
+  adminConfig: { files: {} }
 };
 
 let DATA = [];
@@ -34,6 +41,7 @@ let FILTERED = [];
 let nextRefreshAt = Date.now() + REFRESH_MS;
 let autoTimer = null;
 let activeTab = 'plazas';
+let defaultSecMap = new Map();
 
 /* ============================ Helpers ============================ */
 
@@ -124,6 +132,50 @@ function enrich(r) {
   };
 }
 
+/* ============ Configuración de vistas (admin) ============ */
+
+function gaToSec(ga) { return GA_TO_SEC[ga] || 'envio'; }
+
+function buildDefaultSecMap() {
+  defaultSecMap = new Map();
+  const counts = new Map();
+  for (const r of DATA) {
+    let m = counts.get(r.archivo);
+    if (!m) { m = { envio: 0, respaldo: 0, monitoreo: 0 }; counts.set(r.archivo, m); }
+    m[gaToSec(r.grupo_archivo)]++;
+  }
+  for (const [f, c] of counts) {
+    const e = Object.entries(c).sort((a, b) => b[1] - a[1]);
+    defaultSecMap.set(f, (e.length >= 2 && e[0][1] === e[1][1]) ? 'ambos' : e[0][0]);
+  }
+}
+
+function configOf(name) {
+  const cfg = state.adminConfig.files[name];
+  if (!cfg) return null;
+  return { op: cfg.op !== false, sec: cfg.sec || defaultSecMap.get(name) || 'envio' };
+}
+function isOperative(name) {
+  const c = configOf(name);
+  return c ? c.op : true;
+}
+function sectionOf(name) {
+  const c = configOf(name);
+  return c ? c.sec : (defaultSecMap.get(name) || 'envio');
+}
+function saveAdminConfig() {
+  try { localStorage.setItem('dbf-admin-config', JSON.stringify(state.adminConfig.files)); } catch (e) {}
+}
+function loadAdminConfig() {
+  try {
+    const raw = localStorage.getItem('dbf-admin-config');
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) state.adminConfig.files = obj;
+    }
+  } catch (e) { state.adminConfig.files = {}; }
+}
+
 /* ============================ Estado / filtros ============================ */
 
 function resetFilters() {
@@ -208,13 +260,14 @@ function matches(r) {
 }
 
 function applyFilters() {
-  FILTERED = DATA.filter(matches);
+  FILTERED = DATA.filter(matches).filter(r => isOperative(r.archivo));
   const had = state.query || state.selected.plaza.size || state.selected.grupo.size || state.selected.computadora.size ||
     state.selected.archivo.size || state.sync.size || state.online.size || state.cat.size || state.ext.size || state.tipo.size ||
     state.minSize !== null && state.minSize !== '' || state.maxSize !== null && state.maxSize !== '' || state.fromDate || state.toDateEnd;
   if (!had) state.page = 1;
   if (state.page > Math.max(1, Math.ceil(FILTERED.length / state.perPage))) state.page = 1;
-  $('resultCount').textContent = fmtNum(FILTERED.length) + ' registros';
+  const discarded = DATA.length - FILTERED.length;
+  $('resultCount').textContent = fmtNum(FILTERED.length) + ' registros' + (discarded ? ' · ' + fmtNum(discarded) + ' descartados' : '');
   renderActiveFilters();
   renderAll();
 }
@@ -1090,6 +1143,12 @@ function renderSyncView() {
   } else {
     files = centralCatalogs(rows);
   }
+  if (state.syncSection !== 'todos') {
+    files = files.filter(f => {
+      const s = sectionOf(f);
+      return s === state.syncSection || s === 'ambos';
+    });
+  }
 
   const online = comps.filter(c => c.online).length;
   const off = comps.length - online;
@@ -1101,7 +1160,8 @@ function renderSyncView() {
     chipsHtml('Offline', off, 'err') +
     (vend ? chipsHtml('Vendedores', vend) : '') +
     (ced ? chipsHtml('CEDIS', ced) : '') +
-    chipsHtml('Archivos', rows.length);
+    chipsHtml('Archivos', rows.length) +
+    chipsHtml('Vista', state.syncSection === 'todos' ? 'Todas' : SEC_LABEL[state.syncSection]);
 
   head.innerHTML = '<tr><th class="col-store">Tienda</th>' +
     files.map(f => '<th title="' + esc(f) + '">' + esc(fileShort(f)) + '</th>').join('') + '</tr>';
@@ -1188,6 +1248,147 @@ function closeSyncModal() {
   document.body.style.overflow = '';
 }
 
+/* ============================ Secciones (botones) ============================ */
+
+function renderSyncSectionButtons() {
+  const seen = new Set();
+  const secCounts = { envio: 0, respaldo: 0, monitoreo: 0 };
+  for (const r of DATA) {
+    if (seen.has(r.archivo) || !isOperative(r.archivo)) continue;
+    seen.add(r.archivo);
+    const s = sectionOf(r.archivo);
+    if (s !== 'ambos') secCounts[s]++;
+  }
+  const items = [{ v: 'todos', label: 'Todos', count: seen.size }];
+  for (const v of ['envio', 'respaldo', 'monitoreo']) {
+    if (secCounts[v]) items.push({ v, label: SEC_LABEL[v], count: secCounts[v] });
+  }
+
+  ['syncSection', 'adminSectionPreview'].forEach(hostId => {
+    const host = $(hostId);
+    if (!host) return;
+    host.innerHTML = items.map(it =>
+      '<button type="button" class="seg__btn' + (state.syncSection === it.v ? ' is-active' : '') + '" data-sec="' + it.v + '">' +
+      esc(it.label) + ' <b>' + it.count + '</b></button>'
+    ).join('');
+  });
+
+  document.querySelectorAll('#syncSection .seg__btn, #adminSectionPreview .seg__btn').forEach(b => {
+    b.addEventListener('click', () => {
+      state.syncSection = b.dataset.sec;
+      try { localStorage.setItem('dbf-section', state.syncSection); } catch (e) {}
+      renderSyncSectionButtons();
+      renderSyncView();
+    });
+  });
+}
+
+/* ============================ Panel de administración ============================ */
+
+function renderAdminConfig() {
+  const files = new Map();
+  for (const r of DATA) {
+    let f = files.get(r.archivo);
+    if (!f) { f = { count: 0, stores: new Set(), ga: new Map() }; files.set(r.archivo, f); }
+    f.count++;
+    f.stores.add(r.computadora);
+    const g = r.grupo_archivo || 'other';
+    f.ga.set(g, (f.ga.get(g) || 0) + 1);
+  }
+
+  const q = (state.adminQuery || '').toLowerCase();
+  const list = Array.from(files.entries())
+    .map(([name, f]) => ({
+      name, count: f.count, stores: f.stores.size,
+      ga: Array.from(f.ga.entries()).sort((a, b) => b[1] - a[1])[0][0],
+      op: isOperative(name), sec: sectionOf(name)
+    }))
+    .filter(f => !q || f.name.toLowerCase().includes(q))
+    .sort((a, b) => (b.op - a.op) || (b.count - a.count) || a.name.localeCompare(b.name, 'es'));
+
+  const body = $('tblAdmin').querySelector('tbody');
+  body.innerHTML = list.map((f, i) =>
+    '<tr class="' + (f.op ? 'row-op' : 'row-weak') + '">' +
+      '<td class="num">' + (i + 1) + '</td>' +
+      '<td class="mono">' + esc(f.name) + '</td>' +
+      '<td class="num">' + esc(f.name.includes('.') ? f.name.split('.').pop().toUpperCase() : '—') + '</td>' +
+      '<td><span class="badge ' + (GA_BADGE[f.ga] || 'badge--muted') + '">' + esc(f.ga) + '</span></td>' +
+      '<td class="num">' + fmtNum(f.count) + '</td>' +
+      '<td class="num">' + fmtNum(f.stores) + '</td>' +
+      '<td><label class="switch" title="Operativo: incluir en gráficas y tablas"><input type="checkbox" class="admin-op" data-file="' + esc(f.name) + '"' + (f.op ? ' checked' : '') + '><span class="switch__slider"></span></label></td>' +
+      '<td><div class="seg seg--sec" data-sec-for="' + esc(f.name) + '">' +
+        ['envio', 'respaldo', 'monitoreo', 'ambos'].map(s =>
+          '<button type="button" class="seg__btn' + (f.sec === s ? ' is-active' : '') + '" data-sec="' + s + '" title="' + SEC_LABEL[s] + '">' + SEC_LABEL[s] + '</button>'
+        ).join('') +
+      '</div></td></tr>'
+  ).join('');
+
+  const opCount = Array.from(files.keys()).filter(isOperative).length;
+  const secCounts = { envio: 0, respaldo: 0, monitoreo: 0, ambos: 0 };
+  Array.from(files.keys()).forEach(f => { if (isOperative(f)) secCounts[sectionOf(f)]++; });
+  $('adminChips').innerHTML =
+    chipsHtml('Archivos', files.size) +
+    chipsHtml('Operativos', opCount, 'ok') +
+    chipsHtml('Descartados', files.size - opCount, (files.size - opCount) ? 'err' : '') +
+    chipsHtml('Envío', secCounts.envio) +
+    chipsHtml('Respaldo', secCounts.respaldo) +
+    chipsHtml('Monitoreo', secCounts.monitoreo) +
+    chipsHtml('Ambos', secCounts.ambos);
+}
+
+function setAdminOp(name, op) {
+  const c = state.adminConfig.files[name] || (state.adminConfig.files[name] = {});
+  c.op = op;
+  saveAdminConfig();
+  applyFilters();
+  toast('Archivo ' + (op ? 'operativo' : 'descartado') + ': ' + name);
+}
+
+function setAdminSec(name, sec) {
+  const c = state.adminConfig.files[name] || (state.adminConfig.files[name] = {});
+  c.sec = sec;
+  saveAdminConfig();
+  applyFilters();
+}
+
+function resetAdminConfig() {
+  state.adminConfig.files = {};
+  saveAdminConfig();
+  applyFilters();
+  toast('Configuración restablecida a valores por defecto');
+}
+
+function exportAdminConfig() {
+  const blob = new Blob([JSON.stringify({ app: 'dbf-dashboard', version: 1, files: state.adminConfig.files }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'configuracion-vistas-' + new Date().toISOString().slice(0, 10) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 500);
+  toast('Configuración exportada');
+}
+
+function importAdminConfigFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const obj = JSON.parse(reader.result);
+      const files = (obj && typeof obj === 'object' && obj.files) || obj;
+      if (!files || typeof files !== 'object' || Array.isArray(files)) throw new Error('formato inválido');
+      state.adminConfig.files = files;
+      saveAdminConfig();
+      applyFilters();
+      toast('Configuración importada');
+    } catch (e) {
+      toast('No se pudo importar: ' + e.message, true);
+    }
+  };
+  reader.readAsText(file);
+  $('importConfig').value = '';
+}
+
 /* ============================ Filtros activos ============================ */
 
 function addChip(host, label, value, onRemove) {
@@ -1232,6 +1433,8 @@ function renderAll() {
   renderHeatmaps();
   renderPlazaSidebar();
   renderSyncView();
+  renderSyncSectionButtons();
+  renderAdminConfig();
   const vendRows = FILTERED.filter(r => r.tipo === 'vendedor');
   renderVendedoresKPIs(vendRows);
   renderVendCharts(vendRows);
@@ -1280,6 +1483,7 @@ async function loadData(initial) {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const json = await res.json();
     DATA = (json.data || []).map(enrich);
+    buildDefaultSecMap();
     buildFilterOptions();
     if (initial) { resetFilters(); try { const t = localStorage.getItem('dbf-tab'); if (t) switchTab(t); } catch (e) {} }
     applyFilters();
@@ -1322,6 +1526,7 @@ function applyTheme(theme, persist) {
 /* ============================ Tabs ============================ */
 
 function switchTab(name) {
+  const wasAdmin = document.body.classList.contains('is-admin');
   activeTab = name;
   document.querySelectorAll('.tab-btn').forEach(b => {
     const on = b.dataset.tab === name;
@@ -1329,6 +1534,10 @@ function switchTab(name) {
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('is-active', p.id === 'tab-' + name));
+  document.body.classList.toggle('is-admin', name === 'admin');
+  const badge = $('brandBadge');
+  if (badge) badge.textContent = name === 'admin' ? 'Administración' : 'Reportes';
+  if (wasAdmin !== (name === 'admin')) renderAll();
   try { localStorage.setItem('dbf-tab', name); } catch (e) {}
 }
 
@@ -1364,6 +1573,22 @@ function bindUI() {
   $('syncModal').addEventListener('click', e => { if (e.target === $('syncModal')) closeSyncModal(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSyncModal(); });
 
+  $('adminSearch').addEventListener('input', e => { state.adminQuery = e.target.value.trim(); renderAdminConfig(); });
+  $('btnResetConfig').addEventListener('click', resetAdminConfig);
+  $('btnExportConfig').addEventListener('click', exportAdminConfig);
+  $('btnImportConfig').addEventListener('click', () => $('importConfig').click());
+  $('importConfig').addEventListener('change', e => { if (e.target.files && e.target.files[0]) importAdminConfigFile(e.target.files[0]); });
+  $('tblAdmin').querySelector('tbody').addEventListener('change', e => {
+    if (e.target.classList.contains('admin-op')) setAdminOp(e.target.dataset.file, e.target.checked);
+  });
+  $('tblAdmin').querySelector('tbody').addEventListener('click', e => {
+    const btn = e.target.closest('.seg__btn');
+    if (!btn) return;
+    const wrap = btn.closest('[data-sec-for]');
+    if (!wrap) return;
+    setAdminSec(wrap.dataset.secFor, btn.dataset.sec);
+  });
+
   bindSortables();
   setInterval(() => {
     const now = new Date();
@@ -1380,12 +1605,15 @@ function bindUI() {
 function init() {
   if (!document.documentElement.dataset.theme) document.documentElement.dataset.theme = 'dark';
   chartDefaults();
+  loadAdminConfig();
   bindUI();
   try {
     const tab = localStorage.getItem('dbf-tab');
     if (tab) switchTab(tab);
     const p = localStorage.getItem('dbf-plaza');
     if (p) state.plazaSel = p;
+    const sec = localStorage.getItem('dbf-section');
+    if (sec) state.syncSection = sec;
   } catch (e) {}
   loadData(true);
 }

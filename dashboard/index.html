@@ -28,7 +28,7 @@
     </div>
     <div>
       <h1 class="brand__title">Sincronización de Sistemas</h1>
-      <p class="brand__sub">Central <span class="brand__arrow">⇄</span> Sucursales remotas</p>
+      <p class="brand__sub">Central <span class="brand__arrow">⇄</span> Sucursales remotas <span class="brand__badge" id="brandBadge">Reportes</span></p>
     </div>
   </div>
   <div class="topbar__right">
@@ -60,6 +60,7 @@
   <button class="tab-btn" data-tab="vendedores" role="tab" aria-selected="false">Vendedores</button>
   <button class="tab-btn" data-tab="cedis" role="tab" aria-selected="false">CEDIS</button>
   <button class="tab-btn" data-tab="detalle" role="tab" aria-selected="false">Detalle</button>
+  <button class="tab-btn tab-btn--admin" data-tab="admin" role="tab" aria-selected="false">Administración</button>
 </nav>
 
 <main class="container">
@@ -167,6 +168,11 @@
               </div>
             </div>
             <p class="panel__desc">Cada fila es una tienda de la plaza seleccionada. Cada columna es un archivo y la celda indica su estado con un foco: verde = sincronizado, rojo = desactualizado, ámbar = sin referencia central, gris = no reportado. Haz clic en una tienda para ver el detalle.</p>
+            <div class="sync-sections">
+              <span class="field__label">Sección</span>
+              <div class="seg" id="syncSection"></div>
+              <span class="panel__hint">Muestra solo los archivos de ese grupo</span>
+            </div>
             <div class="sync-head" id="syncPlazaHead"></div>
             <div class="sync-legend">
               <span class="sync-legend__item"><i class="sync-light sync-light--ok"></i> Sincronizado</span>
@@ -487,6 +493,61 @@
           <span class="pager__info" id="pagerInfo">—</span>
           <button class="btn btn--ghost btn--sm" id="btnNext">Siguiente →</button>
         </div>
+      </section>
+    </section>
+
+    <!-- ============ ADMINISTRACIÓN ============ -->
+    <section class="tab-panel" id="tab-admin" role="tabpanel">
+      <section class="panel admin-hero">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">Administración de vistas</h3>
+            <p class="panel__desc">Del origen llegan todos los archivos, pero en operación solo se trabaja con ciertos catálogos. Aquí defines qué archivos son <b>operativos</b> (los que se usan en gráficas y tablas) y a qué <b>sección</b> pertenecen: Envío, Respaldo, Monitoreo o Ambos. La configuración se guarda en este navegador.</p>
+          </div>
+          <div class="table-tools">
+            <button class="btn btn--ghost btn--sm" id="btnResetConfig">Restablecer</button>
+            <button class="btn btn--ghost btn--sm" id="btnImportConfig">Importar</button>
+            <input type="file" id="importConfig" accept=".json,application/json" class="visually-hidden" style="display:none">
+            <button class="btn btn--primary btn--sm" id="btnExportConfig">Exportar</button>
+          </div>
+        </div>
+        <div class="admin-chips" id="adminChips"></div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Catálogo de configuración</h3>
+          <div class="table-tools">
+            <input type="search" class="input input--search" id="adminSearch" placeholder="Buscar archivo…" autocomplete="off">
+          </div>
+        </div>
+        <p class="panel__desc">Marca con <b>✓ Operativo</b> los archivos que las gráficas y tablas deben considerar; los que queden sin marcar se descartan y no generan ruido. Luego asigna la <b>Sección</b> de cada archivo: los que trabajan en envío y respaldo van en <b>Ambos</b>.</p>
+        <div class="table-scroll">
+          <table class="table table--admin" id="tblAdmin">
+            <thead>
+              <tr>
+                <th class="num">#</th>
+                <th>Archivo</th>
+                <th class="num">Ext</th>
+                <th>grupo_archivo</th>
+                <th class="num">Registros</th>
+                <th class="num">Tiendas</th>
+                <th>Operativo</th>
+                <th>Sección</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">Vistas del estado de sincronización</h3>
+          <span class="panel__hint">La misma selección aparece en la pestaña Plazas</span>
+        </div>
+        <p class="panel__desc">Elige qué grupo de archivos mostrar como columnas en la tabla “Estado de sincronización por tienda”. Al crecer la clasificación, los botones crecen automáticamente.</p>
+        <div class="seg" id="adminSectionPreview"></div>
       </section>
     </section>
 

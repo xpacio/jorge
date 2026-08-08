@@ -120,6 +120,20 @@ body {
 .brand__title { font-size: 1.12rem; font-weight: 800; letter-spacing: -0.02em; }
 .brand__sub { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
 .brand__arrow { color: var(--accent-2); font-weight: 700; }
+.brand__badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 9px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #fff;
+  border-radius: 999px;
+  vertical-align: middle;
+  background: linear-gradient(135deg, var(--accent), #4f46e5);
+}
+body.is-admin .brand__badge { background: linear-gradient(135deg, #f59e0b, #ea580c); box-shadow: 0 4px 12px rgba(245, 158, 11, 0.4); }
 
 .topbar__right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .live-clock {
@@ -706,6 +720,85 @@ body {
 .modal__body { padding: 14px 20px 20px; overflow-y: auto; }
 .table--modal td { padding: 8px 10px; }
 .table--modal .mono { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- Administración (tema distinto) ---------- */
+body.is-admin {
+  --accent: #f59e0b;
+  --accent-2: #f97316;
+  --chip-text: #fcd34d;
+}
+body.is-admin .btn--primary { background: linear-gradient(135deg, #f59e0b, #ea580c); box-shadow: 0 6px 18px rgba(245, 158, 11, 0.4); }
+body.is-admin .btn--primary:hover { box-shadow: 0 10px 26px rgba(245, 158, 11, 0.55); }
+body.is-admin .tab-btn.is-active { background: linear-gradient(135deg, #f59e0b, #ea580c); box-shadow: 0 6px 16px rgba(245, 158, 11, 0.4); }
+body.is-admin .chip.is-active:not(.chip--green):not(.chip--red):not(.chip--amber):not(.chip--purple):not(.chip--blue) { background: linear-gradient(135deg, #d97706, #f59e0b); }
+body.is-admin .seg__btn.is-active { background: linear-gradient(135deg, #f59e0b, #ea580c); box-shadow: 0 4px 12px rgba(245, 158, 11, 0.35); }
+body.is-admin .sync-tipo-row td { background: rgba(245, 158, 11, 0.10); }
+body.is-admin .active-chip { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.35); }
+
+/* Control segmentado (secciones) */
+.seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.seg__btn {
+  font-family: var(--font);
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: color .2s ease, background .2s ease, box-shadow .2s ease;
+}
+.seg__btn:hover { color: var(--text); }
+.seg__btn.is-active {
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), #4f46e5);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+}
+.seg__btn b { font-weight: 700; }
+
+.sync-sections { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+
+/* Panel admin */
+.admin-hero { border-left: 3px solid var(--accent); }
+.admin-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.input--search { width: min(260px, 100%); }
+
+/* Tabla de configuración admin */
+.table--admin th, .table--admin td { padding: 8px 12px; }
+.table--admin td.mono { font-family: var(--mono); font-size: 0.76rem; }
+.table--admin tr.row-weak td { opacity: 0.55; }
+.table--admin tr.row-op td { background: rgba(52, 211, 153, 0.035); }
+.table--admin .seg--sec { border-radius: 10px; }
+.table--admin .seg--sec .seg__btn { font-size: 0.68rem; padding: 4px 9px; }
+.table--admin tbody tr { transition: background .2s ease; }
+
+/* Switch operativo */
+.switch { position: relative; display: inline-block; width: 38px; height: 22px; vertical-align: middle; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch__slider {
+  position: absolute; inset: 0; border-radius: 999px; cursor: pointer;
+  background: var(--track-bg);
+  border: 1px solid var(--border);
+  transition: background .2s ease;
+}
+.switch__slider::before {
+  content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+  border-radius: 50%; background: var(--muted);
+  transition: transform .2s ease, background .2s ease;
+}
+.switch input:checked + .switch__slider { background: rgba(52, 211, 153, 0.35); }
+.switch input:checked + .switch__slider::before { transform: translateX(16px); background: var(--green); }
+.switch input:focus-visible + .switch__slider { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 
 /* ---------- Footer ---------- */
 .footer {
