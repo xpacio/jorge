@@ -201,6 +201,7 @@ function buildFilterOptions() {
     createMultiselect('ms' + k.charAt(0).toUpperCase() + k.slice(1), k, list);
   }
   createChips('chipsSync', 'sync', [
+    { v: '__all__', all: true, label: 'Todos' },
     { v: 'Sincronizado', label: 'Sincronizado', cls: 'chip--green' },
     { v: 'Sin referencia', label: 'Sin referencia' },
     { v: 'Desactualizado', label: 'Desactualizado', cls: 'chip--red' }
@@ -226,7 +227,8 @@ function syncChipUI() {
   const selMap = { chipsSync: state.sync, chipsOnline: state.online, chipsCat: state.cat, chipsExt: state.ext, chipsTipo: state.tipo };
   for (const [hostId, set] of Object.entries(selMap)) {
     document.querySelectorAll('#' + hostId + ' .chip').forEach(chip => {
-      chip.classList.toggle('is-active', set.has(chip.textContent.trim()));
+      if (chip.dataset.all) chip.classList.toggle('is-active', set.size === 0);
+      else chip.classList.toggle('is-active', set.has(chip.textContent.trim()));
     });
   }
 }
@@ -345,12 +347,22 @@ function createChips(hostId, key, opts) {
     chip.type = 'button';
     chip.className = 'chip ' + (o.cls || '');
     chip.textContent = o.label;
-    chip.classList.toggle('is-active', selected.has(o.v));
-    chip.addEventListener('click', () => {
-      if (selected.has(o.v)) selected.delete(o.v); else selected.add(o.v);
+    if (o.all) {
+      chip.dataset.all = '1';
+      chip.classList.toggle('is-active', selected.size === 0);
+      chip.addEventListener('click', () => {
+        selected.clear();
+        syncChipUI();
+        applyFilters();
+      });
+    } else {
       chip.classList.toggle('is-active', selected.has(o.v));
-      applyFilters();
-    });
+      chip.addEventListener('click', () => {
+        if (selected.has(o.v)) selected.delete(o.v); else selected.add(o.v);
+        syncChipUI();
+        applyFilters();
+      });
+    }
     host.appendChild(chip);
   });
 }
@@ -1191,7 +1203,7 @@ function renderSyncView() {
       const m = byComp.get(c.computadora) || new Map();
       const connTitle = (c.online ? 'En línea' : 'Sin conexión') + (c.connDate ? ' · última conexión ' + new Date(c.connDate).toLocaleString('es-MX') : '');
       html += '<tr class="is-clickable" data-comp="' + esc(c.computadora) + '">' +
-        '<td class="col-store" title="' + esc(c.computadora) + ' — clic para ver el detalle">' +
+        '<td class="col-store" title="' + esc(c.computadora) + ' — doble clic para ver el detalle">' +
           '<span class="store-name"><i class="conn-dot conn-dot--' + (c.online ? 'on' : 'off') + '" title="' + connTitle + '"></i>' + esc(c.computadora) + '</span>' +
           '<span class="store-sub">' + TIPO_LABEL[c.tipo] + (c.grupo ? ' · ' + c.grupo : '') + '</span>' +
         '</td>' +
@@ -1207,8 +1219,22 @@ function renderSyncView() {
   body.innerHTML = html;
 
   body.querySelectorAll('tr.is-clickable').forEach(tr => {
-    tr.addEventListener('click', () => openSyncModal(tr.dataset.comp));
+    tr.addEventListener('dblclick', () => openSyncModal(tr.dataset.comp));
   });
+
+  syncScrollBars();
+}
+
+/* Barras de desplazamiento superior/inferior de la tabla de sincronización */
+function syncScrollBars() {
+  const wrap = $('syncScroll');
+  const top = $('syncTopScroll');
+  const track = $('syncTopTrack');
+  if (!wrap || !top) return;
+  const can = wrap.scrollWidth > wrap.clientWidth + 2;
+  top.style.display = can ? 'block' : 'none';
+  if (can) track.style.width = wrap.scrollWidth + 'px';
+  top.scrollLeft = wrap.scrollLeft;
 }
 
 function openSyncModal(computadora) {
@@ -1485,7 +1511,12 @@ async function loadData(initial) {
     DATA = (json.data || []).map(enrich);
     buildDefaultSecMap();
     buildFilterOptions();
-    if (initial) { resetFilters(); try { const t = localStorage.getItem('dbf-tab'); if (t) switchTab(t); } catch (e) {} }
+    if (initial) {
+      resetFilters();
+      state.sync.add('Sincronizado');
+      syncChipUI();
+      try { const t = localStorage.getItem('dbf-tab'); if (t) switchTab(t); } catch (e) {}
+    }
     applyFilters();
     markLoaded(initial);
   } catch (e) {
@@ -1538,6 +1569,7 @@ function switchTab(name) {
   const badge = $('brandBadge');
   if (badge) badge.textContent = name === 'admin' ? 'Administración' : 'Reportes';
   if (wasAdmin !== (name === 'admin')) renderAll();
+  if (name === 'plazas') { requestAnimationFrame(syncScrollBars); setTimeout(syncScrollBars, 300); }
   try { localStorage.setItem('dbf-tab', name); } catch (e) {}
 }
 
@@ -1572,6 +1604,50 @@ function bindUI() {
   $('syncModalClose').addEventListener('click', closeSyncModal);
   $('syncModal').addEventListener('click', e => { if (e.target === $('syncModal')) closeSyncModal(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSyncModal(); });
+
+  const syncWrap = $('syncScroll');
+  if (syncWrap) {
+    syncWrap.addEventListener('scroll', () => {
+      const top = $('syncTopScroll');
+      if (top && top.style.display !== 'none') top.scrollLeft = syncWrap.scrollLeft;
+    });
+    $('syncTopScroll').addEventListener('scroll', () => { syncWrap.scrollLeft = $('syncTopScroll').scrollLeft; });
+    window.addEventListener('resize', syncScrollBars);
+
+    let drag = null, suppressClick = false;
+    syncWrap.addEventListener('mousedown', e => {
+      if (e.button !== 0 || e.target.closest('button,input,select,textarea,a,label')) return;
+      drag = { x: e.clientX, y: e.clientY, left: syncWrap.scrollLeft, top: syncWrap.scrollTop, moved: false };
+      syncWrap.classList.add('is-dragging');
+    });
+    window.addEventListener('mousemove', e => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) drag.moved = true;
+      syncWrap.scrollLeft = drag.left - dx;
+      syncWrap.scrollTop = drag.top - dy;
+    });
+    window.addEventListener('mouseup', () => {
+      if (!drag) return;
+      suppressClick = drag.moved;
+      drag = null;
+      syncWrap.classList.remove('is-dragging');
+      setTimeout(() => { suppressClick = false; }, 60);
+    });
+    syncWrap.addEventListener('click', e => {
+      if (suppressClick) { e.preventDefault(); e.stopPropagation(); }
+    }, true);
+  }
+  $('btnExpandSync').addEventListener('click', () => {
+    const panel = $('syncMainPanel');
+    const btn = $('btnExpandSync');
+    const expanded = panel.classList.toggle('is-expanded');
+    btn.classList.toggle('is-expanded', expanded);
+    btn.title = expanded ? 'Restablecer tabla a su tamaño' : 'Expandir tabla a pantalla completa';
+    btn.setAttribute('aria-label', btn.title);
+    requestAnimationFrame(syncScrollBars);
+    setTimeout(syncScrollBars, 260);
+  });
 
   $('adminSearch').addEventListener('input', e => { state.adminQuery = e.target.value.trim(); renderAdminConfig(); });
   $('btnResetConfig').addEventListener('click', resetAdminConfig);

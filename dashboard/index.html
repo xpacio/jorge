@@ -156,7 +156,7 @@
         </aside>
 
         <div class="sync-main">
-          <section class="panel">
+          <section class="panel" id="syncMainPanel">
             <div class="panel__head">
               <h3 class="panel__title">Estado de sincronización por tienda</h3>
               <div class="table-tools">
@@ -165,9 +165,13 @@
                   <option value="catalogos">Solo catálogos centrales</option>
                   <option value="todos">Todos los archivos</option>
                 </select>
+                <button type="button" class="btn btn--icon btn-expand" id="btnExpandSync" title="Expandir tabla a pantalla completa" aria-label="Expandir tabla">
+                  <svg class="ico-max" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+                  <svg class="ico-min" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
+                </button>
               </div>
             </div>
-            <p class="panel__desc">Cada fila es una tienda de la plaza seleccionada. Cada columna es un archivo y la celda indica su estado con un foco: verde = sincronizado, rojo = desactualizado, ámbar = sin referencia central, gris = no reportado. Haz clic en una tienda para ver el detalle.</p>
+            <p class="panel__desc">Cada fila es una tienda de la plaza seleccionada. Cada columna es un archivo y la celda indica su estado con un foco: verde = sincronizado, rojo = desactualizado, ámbar = sin referencia central, gris = no reportado. Arrastra la tabla para desplazarla; haz doble clic en una tienda para ver su detalle.</p>
             <div class="sync-sections">
               <span class="field__label">Sección</span>
               <div class="seg" id="syncSection"></div>
@@ -180,11 +184,14 @@
               <span class="sync-legend__item"><i class="sync-light sync-light--ref"></i> Sin referencia</span>
               <span class="sync-legend__item"><i class="sync-light sync-light--blank"></i> No reportado</span>
             </div>
-            <div class="sync-wrap">
-              <table class="table table--sync" id="tblSync">
-                <thead></thead>
-                <tbody></tbody>
-              </table>
+            <div class="sync-scroll">
+              <div class="sync-scrollbar" id="syncTopScroll" aria-hidden="true"><div class="sync-scrollbar__track" id="syncTopTrack"></div></div>
+              <div class="sync-wrap" id="syncScroll">
+                <table class="table table--sync" id="tblSync">
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
             </div>
           </section>
         </div>
@@ -592,8 +599,15 @@
 </div>
 
 <div class="loader-overlay" id="loader">
+  <div class="loader-sky" aria-hidden="true">
+    <div class="cloud cloud--1"></div>
+    <div class="cloud cloud--2"></div>
+    <div class="cloud cloud--3"></div>
+    <div class="cloud cloud--4"></div>
+  </div>
+  <div class="loader-brand">COMEX CARE</div>
+  <p class="loader-msg">Cargando tu experiencia COMEX CARE, espere mientras se prepara la información. Espere por favor.</p>
   <div class="spinner"></div>
-  <p>Cargando reporte…</p>
 </div>
 
 <div class="toast" id="toast"></div>
