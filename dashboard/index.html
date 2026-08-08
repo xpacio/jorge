@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard de Sincronización DBF — Sistemas ↔ Sucursales</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%236366f1'/%3E%3Cpath d='M13 2 3 14h7l-1 8 10-12h-7l1-8z' fill='white'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="bg-glow bg-glow--1"></div>
+<div class="bg-glow bg-glow--2"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand__logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+        <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path>
+      </svg>
+    </div>
+    <div>
+      <h1 class="brand__title">Sincronización DBF</h1>
+      <p class="brand__sub">Sistemas <span class="brand__arrow">⇄</span> Sucursales remotas</p>
+    </div>
+  </div>
+  <div class="topbar__right">
+    <div class="live-clock" id="clock">--:--:--</div>
+    <div class="last-update" id="lastUpdate">Cargando…</div>
+    <button class="btn btn--ghost" id="btnRefresh" title="Volver a consultar la API">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+      Refrescar
+    </button>
+    <button class="btn btn--primary" id="btnExport">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Exportar CSV
+    </button>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- KPIs -->
+  <section class="kpis" id="kpiGrid" aria-label="Indicadores clave"></section>
+
+  <!-- Filtros -->
+  <section class="panel filters" aria-label="Filtros">
+    <div class="panel__head">
+      <h2 class="panel__title">Filtros</h2>
+      <div class="filters__meta">
+        <span class="result-count" id="resultCount">—</span>
+        <button class="link-btn" id="btnClearAll">Limpiar todo</button>
+      </div>
+    </div>
+
+    <div class="filters__grid">
+      <div class="field">
+        <label class="field__label">Plaza</label>
+        <div class="ms" id="msPlaza"></div>
+      </div>
+      <div class="field">
+        <label class="field__label">Grupo</label>
+        <div class="ms" id="msGrupo"></div>
+      </div>
+      <div class="field">
+        <label class="field__label">Sucursal / Computadora</label>
+        <div class="ms" id="msComputadora"></div>
+      </div>
+      <div class="field">
+        <label class="field__label">Archivo</label>
+        <div class="ms" id="msArchivo"></div>
+      </div>
+    </div>
+
+    <div class="filters__grid filters__grid--2">
+      <div class="field">
+        <label class="field__label">Estado de sincronización</label>
+        <div class="chips" id="chipsSync"></div>
+      </div>
+      <div class="field">
+        <label class="field__label">Estado del equipo</label>
+        <div class="chips" id="chipsOnline"></div>
+      </div>
+      <div class="field">
+        <label class="field__label">Catálogo central</label>
+        <div class="chips" id="chipsCat"></div>
+      </div>
+      <div class="field">
+        <label class="field__label">Tipo de archivo</label>
+        <div class="chips" id="chipsExt"></div>
+      </div>
+    </div>
+
+    <div class="filters__grid filters__grid--filters">
+      <div class="field">
+        <label class="field__label">Buscar archivo / hash / ruta</label>
+        <input type="search" class="input" id="searchQuery" placeholder="Ej: LISTA, D094C, careagent…" autocomplete="off">
+      </div>
+      <div class="field">
+        <label class="field__label">Tamaño mínimo (KB)</label>
+        <input type="number" class="input" id="minSize" min="0" step="1" placeholder="0">
+      </div>
+      <div class="field">
+        <label class="field__label">Tamaño máximo (KB)</label>
+        <input type="number" class="input" id="maxSize" min="0" step="1" placeholder="∞">
+      </div>
+      <div class="field">
+        <label class="field__label">Modificado desde</label>
+        <input type="date" class="input" id="fromDate">
+      </div>
+      <div class="field">
+        <label class="field__label">Modificado hasta</label>
+        <input type="date" class="input" id="toDate">
+      </div>
+    </div>
+
+    <div class="active-filters" id="activeFilters"></div>
+  </section>
+
+  <!-- Gráficas -->
+  <section class="charts-grid" aria-label="Gráficas">
+    <div class="panel chart-card chart-card--sync">
+      <h3 class="panel__title">Estado de sincronización</h3>
+      <p class="panel__desc">Archivos con referencia central de Sistemas (hash coincide) vs. locales sin referencia.</p>
+      <div class="chart-wrap"><canvas id="chartSync"></canvas></div>
+    </div>
+
+    <div class="panel chart-card chart-card--cat">
+      <h3 class="panel__title">Catálogos centrales</h3>
+      <p class="panel__desc">Categorías publicadas por Sistemas vía ruta RBF.</p>
+      <div class="chart-wrap"><canvas id="chartCat"></canvas></div>
+    </div>
+
+    <div class="panel chart-card chart-card--ext">
+      <h3 class="panel__title">Tipos de archivo</h3>
+      <p class="panel__desc">Distribución por extensión en las sucursales.</p>
+      <div class="chart-wrap"><canvas id="chartExt"></canvas></div>
+    </div>
+
+    <div class="panel chart-card chart-card--plaza">
+      <h3 class="panel__title">Cobertura por plaza</h3>
+      <p class="panel__desc">Archivos con y sin referencia central, apilados por plaza.</p>
+      <div class="chart-wrap chart-wrap--tall"><canvas id="chartPlaza"></canvas></div>
+    </div>
+
+    <div class="panel chart-card chart-card--activity">
+      <h3 class="panel__title">Actividad de modificación</h3>
+      <p class="panel__desc">Últimos 14 días, según fecha de modificación de los archivos.</p>
+      <div class="chart-wrap chart-wrap--tall"><canvas id="chartActivity"></canvas></div>
+    </div>
+
+    <div class="panel chart-card chart-card--heavy">
+      <h3 class="panel__title">Archivos más pesados</h3>
+      <p class="panel__desc">Top 10 por tamaño agregado (suma en todas las sucursales).</p>
+      <div class="chart-wrap chart-wrap--tall"><canvas id="chartHeavy"></canvas></div>
+    </div>
+
+    <div class="panel chart-card chart-card--offline">
+      <h3 class="panel__title">Equipos sin conexión por plaza</h3>
+      <p class="panel__desc">Sucursales con estado offline (reportan datos históricos).</p>
+      <div class="chart-wrap chart-wrap--tall"><canvas id="chartOffline"></canvas></div>
+    </div>
+  </section>
+
+  <!-- Tabla resumen por plaza -->
+  <section class="panel table-panel">
+    <div class="panel__head">
+      <h3 class="panel__title">Resumen por plaza</h3>
+      <span class="panel__hint">Se recalculan con los filtros activos</span>
+    </div>
+    <div class="table-scroll">
+      <table class="table table--summary" id="tblPlaza">
+        <thead>
+          <tr>
+            <th>Plaza</th>
+            <th class="num">Archivos</th>
+            <th class="num">Con referencia</th>
+            <th class="num">Sincronizados</th>
+            <th class="num">Sin referencia</th>
+            <th class="num">% cobertura</th>
+            <th class="num">Online</th>
+            <th class="num">Offline</th>
+            <th class="num">Tamaño</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+        <tfoot><tr class="summary-row"><td>TOTAL</td><td class="num" id="sumTotal">—</td><td class="num" id="sumConRef">—</td><td class="num" id="sumSync">—</td><td class="num" id="sumSinRef">—</td><td class="num" id="sumCover">—</td><td class="num" id="sumOnline">—</td><td class="num" id="sumOffline">—</td><td class="num" id="sumSize">—</td></tr></tfoot>
+      </table>
+    </div>
+  </section>
+
+  <!-- Tabla detalle -->
+  <section class="panel table-panel">
+    <div class="panel__head">
+      <h3 class="panel__title">Detalle de archivos</h3>
+      <div class="table-tools">
+        <span class="panel__hint" id="detailRange">—</span>
+        <select class="input input--select" id="perPage">
+          <option value="20">20 / página</option>
+          <option value="50">50 / página</option>
+          <option value="100">100 / página</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="table table--detail" id="tblDetail">
+        <thead>
+          <tr>
+            <th data-sort="archivo" class="sortable">Archivo</th>
+            <th data-sort="computadora" class="sortable">Sucursal</th>
+            <th data-sort="plaza" class="sortable">Plaza</th>
+            <th data-sort="grupo" class="sortable">Grupo</th>
+            <th data-sort="tamano_kb" class="sortable num">Tamaño</th>
+            <th data-sort="sync" class="sortable">Sincronización</th>
+            <th data-sort="estado" class="sortable">Equipo</th>
+            <th data-sort="modDate" class="sortable">Modificado</th>
+            <th>Referencia central</th>
+            <th data-sort="md5" class="sortable">MD5</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button class="btn btn--ghost btn--sm" id="btnPrev">← Anterior</button>
+      <span class="pager__info" id="pagerInfo">—</span>
+      <button class="btn btn--ghost btn--sm" id="btnNext">Siguiente →</button>
+    </div>
+  </section>
+
+  <!-- Ranking computadoras -->
+  <section class="panel table-panel">
+    <div class="panel__head">
+      <h3 class="panel__title">Ranking de sucursales</h3>
+      <span class="panel__hint">Por cantidad de archivos reportados (con barra de cobertura de referencia)</span>
+    </div>
+    <div class="table-scroll">
+      <table class="table table--ranking" id="tblComputers">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Sucursal / Computadora</th>
+            <th>Plaza</th>
+            <th class="num">Archivos</th>
+            <th class="num">Con ref.</th>
+            <th class="num">Sin ref.</th>
+            <th class="num">Sincronizados</th>
+            <th>Cobertura</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <span>Datos: <code>/api/dbf-report</code> · base <code>http://212.227.6.127:8000</code></span>
+  <span id="footerTime"></span>
+</footer>
+
+<div class="loader-overlay" id="loader">
+  <div class="spinner"></div>
+  <p>Consultando API y preparando reporte…</p>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
