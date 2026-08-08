@@ -1,6 +1,6 @@
 /* ============================================================
    Dashboard Sincronización DBF — Central ⇄ Sucursales
-   Tabs: Resumen · Equipos · Mapas de calor · Vendedores · CEDIS · Detalle
+   Tabs: Plazas · Resumen · Equipos · Mapas de calor · Vendedores · CEDIS · Detalle
    Auto-refresco 10 min en segundo plano + tema claro/oscuro
    ============================================================ */
 'use strict';
@@ -25,14 +25,15 @@ const state = {
   query: '', minSize: null, maxSize: null, fromDate: null, toDateEnd: null,
   sortKey: 'sync', sortDir: 'asc',
   eqSortKey: 'computadora', eqSortDir: 'asc',
-  page: 1, perPage: 20, heatMetric: 'count'
+  page: 1, perPage: 20, heatMetric: 'count',
+  plazaSel: null, syncMode: 'catalogos', plazaQuery: ''
 };
 
 let DATA = [];
 let FILTERED = [];
 let nextRefreshAt = Date.now() + REFRESH_MS;
 let autoTimer = null;
-let activeTab = 'resumen';
+let activeTab = 'plazas';
 
 /* ============================ Helpers ============================ */
 
@@ -999,6 +1000,194 @@ function renderHeatmaps() {
   renderHeatmap('hmArchivo', 'hmArchivoHint', archTop, plazasOrder, mArch, { _: RGB.cyan }, metric);
 }
 
+/* ============================ Vista Plazas (por tienda) ============================ */
+
+function fileShort(name) {
+  const i = String(name).lastIndexOf('.');
+  return i > 0 ? name.slice(0, i) : name;
+}
+
+function chipsHtml(label, val, tone) {
+  return '<span class="sync-chip' + (tone ? ' sync-chip--' + tone : '') + '">' + esc(label) + ' <b>' + val + '</b></span>';
+}
+
+function renderPlazaSidebar() {
+  const list = $('plazaList');
+  if (!list) return;
+  const byPlaza = new Map();
+  for (const r of FILTERED) {
+    let comps = byPlaza.get(r.plaza);
+    if (!comps) { comps = new Map(); byPlaza.set(r.plaza, comps); }
+    let c = comps.get(r.computadora);
+    if (!c) { c = { online: false }; comps.set(r.computadora, c); }
+    if (r.estado === 'online') c.online = true;
+  }
+
+  const q = (state.plazaQuery || '').toLowerCase();
+  const plazas = Array.from(byPlaza.entries())
+    .map(([plaza, comps]) => {
+      const arr = Array.from(comps.values());
+      return { plaza, tiendas: arr.length, online: arr.filter(c => c.online).length };
+    })
+    .filter(p => !q || p.plaza.toLowerCase().includes(q))
+    .sort((a, b) => b.tiendas - a.tiendas || a.plaza.localeCompare(b.plaza, 'es'));
+
+  $('plazaCount').textContent = byPlaza.size ? byPlaza.size + ' plazas' : '—';
+
+  if (!plazas.length) {
+    list.innerHTML = '<div class="plaza-empty">Sin plazas con los filtros actuales</div>';
+    return;
+  }
+
+  if (!state.plazaSel || !byPlaza.has(state.plazaSel)) {
+    state.plazaSel = plazas[0].plaza;
+    try { localStorage.setItem('dbf-plaza', state.plazaSel); } catch (e) {}
+  }
+
+  list.innerHTML = plazas.map(p => {
+    const off = p.tiendas - p.online;
+    const meta = '<span class="plaza-dot plaza-dot--on"></span>' + p.online +
+      (off ? '<span class="plaza-dot plaza-dot--off"></span><span class="plaza-btn__off">' + off + '</span>' : '');
+    return '<button type="button" class="plaza-btn' + (p.plaza === state.plazaSel ? ' is-active' : '') + '" data-plaza="' + esc(p.plaza) + '" title="' + esc(p.plaza) + ' · ' + p.online + ' en línea, ' + off + ' sin conexión">' +
+      '<span class="plaza-btn__name">' + esc(p.plaza) + '</span>' +
+      '<span class="plaza-btn__meta">' + meta + '</span>' +
+    '</button>';
+  }).join('');
+
+  list.querySelectorAll('.plaza-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.plazaSel = btn.dataset.plaza;
+      try { localStorage.setItem('dbf-plaza', state.plazaSel); } catch (e) {}
+      renderPlazaSidebar();
+      renderSyncView();
+    });
+  });
+}
+
+function centralCatalogs(rows) {
+  const map = new Map();
+  for (const r of rows) if (r.hasRef) map.set(r.archivo, (map.get(r.archivo) || 0) + 1);
+  return Array.from(map.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'es')).map(e => e[0]);
+}
+
+function renderSyncView() {
+  const tbl = $('tblSync');
+  if (!tbl) return;
+  const head = tbl.querySelector('thead');
+  const body = tbl.querySelector('tbody');
+
+  if (!state.plazaSel) { head.innerHTML = ''; body.innerHTML = ''; $('syncPlazaHead').innerHTML = ''; return; }
+
+  const rows = FILTERED.filter(r => r.plaza === state.plazaSel);
+  const comps = summarizeComputers(rows);
+
+  let files;
+  if (state.syncMode === 'todos') {
+    const map = new Map();
+    for (const r of rows) map.set(r.archivo, (map.get(r.archivo) || 0) + 1);
+    files = Array.from(map.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'es')).map(e => e[0]);
+    if (files.length > 40) files = files.slice(0, 40);
+  } else {
+    files = centralCatalogs(rows);
+  }
+
+  const online = comps.filter(c => c.online).length;
+  const off = comps.length - online;
+  const vend = comps.filter(c => c.tipo === 'vendedor').length;
+  const ced = comps.filter(c => c.tipo === 'cedis').length;
+  $('syncPlazaHead').innerHTML =
+    chipsHtml('Tiendas', comps.length) +
+    chipsHtml('Online', online, 'ok') +
+    chipsHtml('Offline', off, 'err') +
+    (vend ? chipsHtml('Vendedores', vend) : '') +
+    (ced ? chipsHtml('CEDIS', ced) : '') +
+    chipsHtml('Archivos', rows.length);
+
+  head.innerHTML = '<tr><th class="col-store">Tienda</th>' +
+    files.map(f => '<th title="' + esc(f) + '">' + esc(fileShort(f)) + '</th>').join('') + '</tr>';
+
+  const byComp = new Map();
+  for (const r of rows) {
+    if (!files.includes(r.archivo)) continue;
+    let m = byComp.get(r.computadora);
+    if (!m) { m = new Map(); byComp.set(r.computadora, m); }
+    if (!m.has(r.archivo)) m.set(r.archivo, r);
+  }
+
+  const groups = [
+    { key: 'tienda', label: 'Sucursales' },
+    { key: 'vendedor', label: 'Vendedores' },
+    { key: 'cedis', label: 'CEDIS' }
+  ];
+  const sortedComps = comps.slice().sort((a, b) => (b.online - a.online) || a.computadora.localeCompare(b.computadora, 'es'));
+  const nCols = files.length + 1;
+
+  let html = '';
+  for (const g of groups) {
+    const members = sortedComps.filter(c => c.tipo === g.key);
+    if (!members.length) continue;
+    html += '<tr class="sync-tipo-row"><td colspan="' + nCols + '">' + g.label + ' · ' + members.length + '</td></tr>';
+    for (const c of members) {
+      const m = byComp.get(c.computadora) || new Map();
+      const connTitle = (c.online ? 'En línea' : 'Sin conexión') + (c.connDate ? ' · última conexión ' + new Date(c.connDate).toLocaleString('es-MX') : '');
+      html += '<tr class="is-clickable" data-comp="' + esc(c.computadora) + '">' +
+        '<td class="col-store" title="' + esc(c.computadora) + ' — clic para ver el detalle">' +
+          '<span class="store-name"><i class="conn-dot conn-dot--' + (c.online ? 'on' : 'off') + '" title="' + connTitle + '"></i>' + esc(c.computadora) + '</span>' +
+          '<span class="store-sub">' + TIPO_LABEL[c.tipo] + (c.grupo ? ' · ' + c.grupo : '') + '</span>' +
+        '</td>' +
+        files.map(f => {
+          const r = m.get(f);
+          if (!r) return '<td class="num" title="No reportado"><i class="sync-light sync-light--blank"></i></td>';
+          const cls = r.sync === 'Sincronizado' ? 'ok' : r.sync === 'Desactualizado' ? 'err' : 'ref';
+          return '<td class="num" title="' + esc(f + ' · ' + r.sync + (r.hasRef ? ' · ' + r.md5 : '')) + '"><i class="sync-light sync-light--' + cls + '"></i></td>';
+        }).join('') +
+      '</tr>';
+    }
+  }
+  body.innerHTML = html;
+
+  body.querySelectorAll('tr.is-clickable').forEach(tr => {
+    tr.addEventListener('click', () => openSyncModal(tr.dataset.comp));
+  });
+}
+
+function openSyncModal(computadora) {
+  const rows = FILTERED.filter(r => r.computadora === computadora);
+  if (!rows.length) return;
+  const comp = summarizeComputers(rows)[0];
+  $('syncModalTitle').textContent = computadora;
+  $('syncModalSub').textContent =
+    (comp.plaza || '—') + ' · ' + TIPO_LABEL[comp.tipo] +
+    (comp.online ? ' · En línea' : ' · Sin conexión') +
+    (comp.connDate ? ' · Última conexión: ' + new Date(comp.connDate).toLocaleString('es-MX') : '') +
+    ' · ' + rows.length + ' archivos';
+
+  const sorted = rows.slice().sort((a, b) => {
+    const sa = SYNC_ORDER[a.sync] ?? 1, sb = SYNC_ORDER[b.sync] ?? 1;
+    return sa - sb || a.archivo.localeCompare(b.archivo, 'es');
+  });
+  $('tblModal').querySelector('tbody').innerHTML = sorted.map(r => {
+    const cls = r.sync === 'Sincronizado' ? 'badge--green' : r.sync === 'Desactualizado' ? 'badge--red' : 'badge--amber';
+    return '<tr>' +
+      '<td class="mono">' + esc(r.archivo) + '</td>' +
+      '<td><span class="badge ' + cls + '">' + esc(r.sync) + '</span></td>' +
+      '<td class="num">' + fmtSize(r.tamano_kb) + '</td>' +
+      '<td class="mono">' + esc(r.ultima_modificacion || '—') + '</td>' +
+      '<td class="mono" title="' + esc(r.md5 || '') + '">' + esc(r.md5 || '—') + '</td>' +
+      '<td class="mono" title="' + esc(r.hash_rbf || '') + '">' + esc(r.hash_rbf || '—') + '</td>' +
+      '<td class="mono" title="' + esc(r.ruta_rbf || '') + '">' + esc(r.ruta_rbf || '—') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  $('syncModal').classList.add('is-open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeSyncModal() {
+  $('syncModal').classList.remove('is-open');
+  document.body.style.overflow = '';
+}
+
 /* ============================ Filtros activos ============================ */
 
 function addChip(host, label, value, onRemove) {
@@ -1041,6 +1230,8 @@ function renderAll() {
   renderEquiposCharts();
   renderEquiposTable();
   renderHeatmaps();
+  renderPlazaSidebar();
+  renderSyncView();
   const vendRows = FILTERED.filter(r => r.tipo === 'vendedor');
   renderVendedoresKPIs(vendRows);
   renderVendCharts(vendRows);
@@ -1167,6 +1358,12 @@ function bindUI() {
   });
   $('heatMetric').addEventListener('change', e => { state.heatMetric = e.target.value; renderHeatmaps(); });
 
+  $('plazaSearch').addEventListener('input', e => { state.plazaQuery = e.target.value.trim(); renderPlazaSidebar(); });
+  $('syncMode').addEventListener('change', e => { state.syncMode = e.target.value; renderSyncView(); });
+  $('syncModalClose').addEventListener('click', closeSyncModal);
+  $('syncModal').addEventListener('click', e => { if (e.target === $('syncModal')) closeSyncModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSyncModal(); });
+
   bindSortables();
   setInterval(() => {
     const now = new Date();
@@ -1187,6 +1384,8 @@ function init() {
   try {
     const tab = localStorage.getItem('dbf-tab');
     if (tab) switchTab(tab);
+    const p = localStorage.getItem('dbf-plaza');
+    if (p) state.plazaSel = p;
   } catch (e) {}
   loadData(true);
 }
